@@ -1,5 +1,9 @@
 from openai import OpenAI
 
+# 获取用户输入
+image_url = input("请输入图片URL: ")
+user_text = input("请输入您的指令: ")
+
 # 构建消息列表
 messages = [
     {
@@ -49,12 +53,12 @@ messages = [
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": "https://img.alicdn.com/imgextra/i2/O1CN016iJ8ob1C3xP1s2M6z_!!6000000000026-2-tps-3008-1758.png"
+                    "url": image_url
                 }
             },
             {
                 "type": "text",
-                "text": "帮我打开一个可用于Python编程的软件。"
+                "text": user_text
             }
         ]
     }
