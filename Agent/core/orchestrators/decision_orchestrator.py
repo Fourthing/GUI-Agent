@@ -121,7 +121,7 @@ class DecisionOrchestrator:
                 'step_no': step_no,
                 'task_id': task_id,
                 'thought': action_json.get('thought', ''),
-                'action': action_json.get('action'),
+                'action': action_json.get('Action'),
                 'parameters': action_json.get('parameters'),
                 'full_response': action_json
             }

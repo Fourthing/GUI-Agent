@@ -20,8 +20,6 @@ def run_api_server():
     print("=" * 60)
     print("🚀 GUI-Agent API 服务启动")
     print("=" * 60)
-    print("接口地址：http://localhost:5000/api/decision")
-    print("健康检查：http://localhost:5000/api/health")
     print("按 Ctrl+C 停止服务\n")
 
     app.run(host='0.0.0.0', port=5000, debug=True)
