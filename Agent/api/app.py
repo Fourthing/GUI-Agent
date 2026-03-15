@@ -218,15 +218,17 @@ def plan_task():
 @app.route('/api/decision', methods=['POST'])
 def decision():
     """
-    【单步决策接口】基于当前屏幕截图和指令，生成操作动作
+    决策 + 自动执行
 
-    使用异步上传：截图后立即开始 VLM 决策，同时后台上传图片
+    流程：截图 → VLM 决策 → 自动执行动作 → 返回结果
 
     Request:
     {
         "prompt": "双击桌面上的 Chrome 浏览器图标",
         "task_id": "task_xxx",
-        "step_no": 1
+        "step_no": 1,
+        "auto_execute": true,        # 是否自动执行（默认 true）
+        "safety_mode": false          # 安全模式（默认 false）
     }
 
     Response:
@@ -235,8 +237,13 @@ def decision():
         "thought": "...",
         "action": "CLICK",
         "parameters": {"x": 100, "y": 200},
-        "screenshot_url": "https://...",  # 图床 URL（可能还在上传中）
-        "upload_status": "completed|pending|failed",  # 上传状态
+        "execution_result": {         # 新增：执行结果
+            "success": true,
+            "message": "已点击位置 (100, 200)",
+            "before_screenshot": "...",
+            "after_screenshot": "..."
+        },
+        "screenshot_url": "https://...",
         "step_no": 1,
         "task_id": "task_xxx"
     }
@@ -253,12 +260,15 @@ def decision():
         prompt = data['prompt']
         task_id = data.get('task_id', None)
         step_no = data.get('step_no', 1)
+        auto_execute = data.get('auto_execute', True)  # 默认自动执行
+        safety_mode = data.get('safety_mode', False)  # 默认不安全模式
 
         log_prefix = f"[Task:{task_id}] Step:{step_no}" if task_id else f"Step:{step_no}"
 
         print(f"\n{'=' * 60}")
         print(f"[API] 📥 收到决策请求")
         print(f"{log_prefix} 指令：{prompt}")
+        print(f"自动执行：{'是' if auto_execute else '否'}")
         print(f"{'=' * 60}\n")
 
         # ========== 步骤 1: 屏幕截图 ==========
@@ -267,59 +277,98 @@ def decision():
         screenshot_path = capturer.capture()
         print(f"✓ 截图已保存：{screenshot_path}")
 
-        # ========== 步骤 2: 转换为 base64（用于 VLM 调用）==========
+        # ========== 步骤 2: 转换为 base64 ==========
         print(f"{log_prefix} 🔄 [Convert] 转换为 base64...")
         start_time = time.time()
         screenshot_base64 = capturer.capture_to_base64()
         convert_time = round(time.time() - start_time, 2)
         print(f"✓ Base64 长度：{len(screenshot_base64)} (耗时：{convert_time}s)")
 
-        # ========== 步骤 3: 异步上传到图床（不阻塞）==========
+        # ========== 步骤 3: 异步上传到图床 ==========
         print(f"{log_prefix} 🚀 [Upload] 启动异步上传...")
         upload_future = upload_executor.submit(upload_to_picgo, screenshot_path)
 
-        # ========== 步骤 4: VLM 决策（使用 base64，立即开始）==========
+        # ========== 步骤 4: VLM 决策 ==========
         print(f"{log_prefix} 🧠 [Decision] 正在分析...")
         orchestrator = DecisionOrchestrator()
 
         image_data_url = f"data:image/png;base64,{screenshot_base64}"
 
-        decision_start_time = time.time()
+        start_time = time.time()
         decision_result = orchestrator.decide(
             image_url=image_data_url,
             user_instruction=prompt,
             step_no=step_no,
             task_id=task_id
         )
-        decision_time = round(time.time() - decision_start_time, 2)
+        decision_time = round(time.time() - start_time, 2)
 
         if not decision_result['success']:
             return jsonify(decision_result), 500
 
-        # ========== 步骤 5: 检查上传状态（非阻塞）==========
+        # ========== 步骤 5: 自动执行动作（新增！）==========
+        execution_result = None
+
+        if auto_execute:
+            print(f"\n{log_prefix} ⚙️  [Execute] 准备自动执行...")
+
+            # 提取动作信息
+            full_response = decision_result.get('full_response', {})
+            action = (full_response.get('action') or
+                      full_response.get('Action') or
+                      '').strip().upper()  # ← 新增：去空格 + 转大写
+            parameters = full_response.get('parameters') or full_response.get('Parameters') or {}
+            description = full_response.get('description', '')
+
+            if action and action not in ['FINISH', 'FAILE', 'FAIL']:
+                # 构建执行数据
+                action_data = {
+                    'action': action,
+                    'parameters': parameters,
+                    'description': description
+                }
+
+                print(f"{log_prefix} 📍 执行动作：{action}")
+                print(f"{log_prefix} 参数：{parameters}")
+
+                # 调用 ActionModule 执行
+                from core.action_module import ActionModule
+                executor = ActionModule(safety_mode=safety_mode)
+                execution_result = executor.execute(action_data)
+
+                if execution_result.get('success'):
+                    print(f"{log_prefix} ✅ 执行成功：{execution_result.get('message')}")
+                else:
+                    print(f"{log_prefix} ❌ 执行失败：{execution_result.get('message')}")
+            else:
+                print(f"{log_prefix} ⚠️  无需执行或特殊动作：{action}")
+                execution_result = {
+                    'success': True,
+                    'message': f'动作类型：{action}，无需执行',
+                    'action': action
+                }
+        else:
+            print(f"{log_prefix} ℹ️  跳过自动执行（auto_execute=false）")
+
+        # ========== 步骤 6: 检查上传状态 ==========
         screenshot_url = None
         upload_status = "pending"
-        upload_time = 0
 
         try:
-            # 尝试等待上传完成（最多等 0.1 秒）
             screenshot_url = upload_future.result(timeout=0.1)
             if screenshot_url:
                 upload_status = "completed"
-                upload_time = round(time.time() - decision_start_time, 2)
                 print(f"{log_prefix} ✓ 上传完成：{screenshot_url}")
             else:
                 upload_status = "failed"
-                print(f"{log_prefix} ⚠️  上传失败")
         except FuturesTimeoutError:
-            # 上传还没完成，但不等待了
             upload_status = "pending"
-            print(f"{log_prefix} ⏳ 上传进行中（后台继续）")
+            print(f"{log_prefix} ⏳ 上传进行中")
         except Exception as e:
             upload_status = "failed"
             print(f"{log_prefix} ⚠️  上传异常：{e}")
 
-        # ========== 步骤 6: 构建响应 ==========
+        # ========== 步骤 7: 构建响应 ==========
         full_response = decision_result.get('full_response', {})
         thought = full_response.get('thought', '')
         action = full_response.get('action') or full_response.get('Action') or 'UNKNOWN'
@@ -336,9 +385,10 @@ def decision():
             'full_response': full_response,
             'screenshot_path': screenshot_path,
             'screenshot_url': screenshot_url,
-            'upload_status': upload_status,  # completed/pending/failed
+            'upload_status': upload_status,
             'step_no': step_no,
             'task_id': task_id,
+            'execution_result': execution_result,  # 新增：执行结果
             'timing': {
                 'convert_time': convert_time,
                 'decision_time': decision_time,
@@ -347,13 +397,14 @@ def decision():
         }
 
         print(f"\n{'=' * 60}")
-        print(f"[API] ✅ 决策完成")
+        print(f"[API] ✅ 决策+执行完成")
         print(f"Thought: {thought[:100]}...")
         print(f"Action: {action}")
+        if execution_result:
+            exec_msg = execution_result.get('message', '')
+            print(f"执行结果：{exec_msg[:100] if exec_msg else 'N/A'}...")
         if screenshot_url:
             print(f"截图 URL: {screenshot_url}")
-        else:
-            print(f"截图上传状态：{upload_status}（稍后可通过 screenshot_path 访问本地文件）")
         print(f"总耗时：{response_data['timing']['total_time']}s")
         print(f"{'=' * 60}\n")
 
@@ -367,6 +418,7 @@ def decision():
             'success': False,
             'error': error_msg
         }), 500
+
 
 @app.route('/api/health', methods=['GET'])
 def health_check():

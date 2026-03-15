@@ -43,6 +43,10 @@ class DecisionOrchestrator:
         """
         log_prefix = f"[Task:{task_id}] Step:{step_no}" if task_id else f"Step:{step_no}"
 
+        # ========== 获取屏幕分辨率（新增！）==========
+        import pyautogui
+        screen_width, screen_height = pyautogui.size()
+
         messages = [
             {
                 "role": "system",
@@ -81,7 +85,19 @@ class DecisionOrchestrator:
 - **功能**: 任务无法完成。
 - **Parameters 模板**: {"reason": "<string: 清晰解释失败原因>"}
 
-## 4. 思维与决策框架
+## 4. 当前屏幕信息和坐标参数规范
+- **屏幕分辨率**: {screen_width} x {screen_height} 像素
+- **有效坐标范围**: 
+  - X 轴：0 到 {screen_width - 1}（从左到右）
+  - Y 轴：0 到 {screen_height - 1}（从上到下）
+- **重要区域参考**:
+  - 左上角坐标：(0, 0)
+  - 右上角坐标：({screen_width - 1}, 0)
+  - 左下角坐标：(0, {screen_height - 1})
+  - 右下角坐标：({screen_width - 1}, {screen_height - 1})
+- 输出时参考："x": 100, // ← 必须是单个整数（横坐标） "y": 200, // ← 必须是单个整数（纵坐标）。请检查输出，不能出现单个x和y是一个数组的情况！！！比如“'x': [1204, 13]”
+
+## 5. 思维与决策框架
 目标分析 → 屏幕观察 → 行动决策 → 构建输出 → 最终验证
 '''
             },
