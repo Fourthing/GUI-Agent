@@ -127,7 +127,7 @@ class DecisionOrchestrator:
             response_content = completion.choices[0].message.content.strip()
             print(f"{log_prefix} VLM 原始响应：{response_content}")
 
-            # 解析 JSON 响应（保持 try.py 中的原始逻辑）
+            # 解析 JSON 响应
             action_json = json.loads(response_content)
 
             print(f"{log_prefix} 解析成功的动作：{action_json}")

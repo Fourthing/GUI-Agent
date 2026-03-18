@@ -48,7 +48,7 @@ class TaskPlanner:
 {
     "step": <序号，从 1 开始>,
     "instruction": "<清晰的步骤描述，包含具体的 UI 元素和操作>",
-    "expected_action": "<预期的动作类型：CLICK/TYPE/SCROLL/KEY_PRESS/FINISH>"
+    "expected_action": "<预期的动作类型：CLICK/TYPE/SCROLL/KEY_PRESS/FINISH/DOUBLE_CLICK/RIGHT_CLICK/DRAG_TO/HOTKEY>"
 }
 
 ## 示例 1
