@@ -57,11 +57,10 @@ class ScreenCapturer:
             # 使用 PyAutoGUI 截图
             """捕获屏幕截图并保存到文件"""
             screenshot = pyautogui.screenshot()
-            file_path = f"screenshots/screenshot_{int(time.time())}.png"
 
             print(f"[ScreenCapturer] ✓ 截图已保存：{save_path}")
-            screenshot.save(file_path)
-            return file_path
+            screenshot.save(save_path)
+            return save_path
 
         except Exception as e:
             raise Exception(f"截图失败：{str(e)}")
