@@ -95,7 +95,12 @@ class DecisionOrchestrator:
   - 右上角坐标：({screen_width - 1}, 0)
   - 左下角坐标：(0, {screen_height - 1})
   - 右下角坐标：({screen_width - 1}, {screen_height - 1})
-- 输出时参考："x": 100, // ← 必须是单个整数（横坐标） "y": 200, // ← 必须是单个整数（纵坐标）。请检查输出，不能出现单个x和y是一个数组的情况！！！比如“'x': [1204, 13]”
+- **坐标输出要求**:
+  - "x": 必须是一个整数，表示横坐标
+  - "y": 必须是一个整数，表示纵坐标
+  - 绝对禁止使用数组形式如 "[x, y]" 或 "'x': [123, 45]"
+  - 示例："x": 100, "y": 200
+  - 错误示例："x": [100, 200], "y": [100, 200]
 
 ## 5. Reflect 验证机制
 你的每个操作决策都会被 Reflect Agent 验证系统检查。
@@ -181,6 +186,11 @@ class DecisionOrchestrator:
             print(f"{log_prefix} VLM 原始响应：{response_content}")
 
             # 解析 JSON 响应
+            if response_content.startswith('```json'):
+                response_content = response_content[7:]
+            if response_content.endswith('```'):
+                response_content = response_content[:-3]
+            response_content = response_content.strip()
             action_json = json.loads(response_content)
 
             print(f"{log_prefix} 解析成功的动作：{action_json}")
