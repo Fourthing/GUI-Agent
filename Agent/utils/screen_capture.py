@@ -7,7 +7,8 @@ import base64
 import os
 import time
 from PIL import Image
-from io import BytesIO
+import io
+import base64
 
 
 class ScreenCapturer:
@@ -31,6 +32,13 @@ class ScreenCapturer:
         pyautogui.FAILSAFE = True  # 启用安全模式
         pyautogui.PAUSE = 0.5  # 操作间隔
 
+        # 获取屏幕尺寸
+        self.screen_width, self.screen_height = pyautogui.size()
+
+        # VLM 支持的最大尺寸
+        self.MAX_WIDTH = 2048
+        self.MAX_HEIGHT = 2048
+
     def capture(self, save_path: str = None) -> str:
         """
         截取整个屏幕
@@ -47,11 +55,13 @@ class ScreenCapturer:
 
         try:
             # 使用 PyAutoGUI 截图
+            """捕获屏幕截图并保存到文件"""
             screenshot = pyautogui.screenshot()
-            screenshot.save(save_path)
+            file_path = f"screenshots/screenshot_{int(time.time())}.png"
 
             print(f"[ScreenCapturer] ✓ 截图已保存：{save_path}")
-            return save_path
+            screenshot.save(file_path)
+            return file_path
 
         except Exception as e:
             raise Exception(f"截图失败：{str(e)}")
@@ -91,13 +101,36 @@ class ScreenCapturer:
         try:
             screenshot = pyautogui.screenshot()
 
-            # 转换为 base64
-            buffered = BytesIO()
-            screenshot.save(buffered, format="PNG")
-            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            # ========== 处理大尺寸图片 ==========
+            if (screenshot.width > self.MAX_WIDTH or
+                    screenshot.height > self.MAX_HEIGHT):
+                print(f"⚠️  原始截图尺寸: {screenshot.width}x{screenshot.height}")
+                print(f"📏 正在调整到最大支持尺寸...")
 
-            print(f"[ScreenCapturer] ✓ 截图已转换为 base64")
-            return img_base64
+                # 计算缩放比例（保持宽高比）
+                scale_w = self.MAX_WIDTH / screenshot.width
+                scale_h = self.MAX_HEIGHT / screenshot.height
+                scale = min(scale_w, scale_h)
+
+                new_width = int(screenshot.width * scale)
+                new_height = int(screenshot.height * scale)
+
+                # 缩放图片（高质量）
+                resized_screenshot = screenshot.resize(
+                    (new_width, new_height),
+                    Image.Resampling.LANCZOS
+                )
+
+                print(f"✅ 已调整尺寸: {new_width}x{new_height}")
+
+                # 使用缩放后的图片
+                screenshot = resized_screenshot
+
+            # 将图像转换为 base64
+            buffer = io.BytesIO()
+            screenshot.save(buffer, format="PNG")
+            img_str = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            return img_str
 
         except Exception as e:
             raise Exception(f"截图转 base64 失败：{str(e)}")
