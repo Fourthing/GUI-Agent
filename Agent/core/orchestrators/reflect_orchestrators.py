@@ -103,7 +103,6 @@ class ReflectAgent:
 {
     "status": "A|B|C|D|E",           // 必须是大写字母
     "success": true/false,            // 是否成功（A 和 E 为 true）
-    "confidence": 0.0-1.0,            // 置信度（0-1 之间的小数）
     "changes_detected": [             // 检测到的变化列表
         "变化 1 描述",
         "变化 2 描述"

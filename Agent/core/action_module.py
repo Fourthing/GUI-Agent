@@ -18,6 +18,15 @@ class ActionModule:
         pyautogui.FAILSAFE = True  # 鼠标移到角落可中断
         pyautogui.PAUSE = 0.3  # 操作间隔（缩短到 0.3s）
 
+        # 初始化 ACI（用于 element_id 动态定位）
+        try:
+            from .windows_aci import WindowsACI
+            self.aci = WindowsACI(top_app_only=True)
+            print("[ActionModule] ✓ ACI 初始化完成")
+        except Exception as e:
+            print(f"[ActionModule] ⚠️  ACI 初始化失败：{e}")
+            self.aci = None
+
         print("[ActionModule] ✓ 初始化完成")
         print(f"[ActionModule] 安全模式：{'开启' if safety_mode else '关闭'}")
 
@@ -105,6 +114,58 @@ class ActionModule:
                 'action': action
             }
 
+    def _resolve_element_coordinates(self, params: Dict) -> Tuple[Optional[int], Optional[int]]:
+        """
+        解析元素坐标（支持 element_id 动态定位）
+
+        Args:
+            params: 参数字典，可能包含 element_id 或 x/y
+
+        Returns:
+            (x, y) 坐标元组，如果无法解析则返回 (None, None)
+        """
+        element_id = params.get('element_id')
+
+        # 如果提供了 element_id，使用 ACI 动态定位
+        if element_id is not None and self.aci:
+            try:
+                print(f"[Action] 🔍 通过 element_id={element_id} 动态定位...")
+
+                # 重新提取 UI 元素（确保坐标最新）
+                obs = {}
+                ui_elements = self.aci.linearize_and_annotate_tree(obs)
+
+                if element_id < len(ui_elements):
+                    elem = ui_elements[element_id]
+                    x, y = elem['position']
+                    w, h = elem['size']
+
+                    # 计算中心点
+                    center_x = x + w // 2
+                    center_y = y + h // 2
+
+                    elem_name = elem.get('title') or elem.get('text') or '未命名'
+                    print(f"[Action] ✓ 找到元素：{elem_name} ({elem['role']})")
+                    print(f"[Action] ✓ 动态坐标：({center_x}, {center_y})")
+
+                    return center_x, center_y
+                else:
+                    print(f"[Action] ⚠️  element_id={element_id} 超出范围（共 {len(ui_elements)} 个元素）")
+                    return None, None
+            except Exception as e:
+                print(f"[Action] ⚠️  element_id 定位失败：{e}，降级到 x/y 坐标")
+                return None, None
+
+        # 没有 element_id 或 ACI 不可用，使用传统的 x/y 坐标
+        x_raw = params.get('x')
+        y_raw = params.get('y')
+
+        if x_raw is not None and y_raw is not None:
+            x, y = self._normalize_coordinates(x_raw, y_raw)
+            return x, y
+
+        return None, None
+
     def _capture_current_state(self) -> Optional[str]:
         """截取当前屏幕状态（base64）"""
         try:
@@ -156,23 +217,22 @@ class ActionModule:
         点击操作
 
         Parameters:
+            element_id: 元素 ID（优先使用，动态定位）
             x: 横坐标（支持数字、数组、字符串）
             y: 纵坐标
             description: 描述（可选）
             clicks: 点击次数（默认 1）
             interval: 点击间隔（默认 0.1s）
         """
-        x_raw = params.get('x')
-        y_raw = params.get('y')
         description = params.get('description', '')
         clicks = params.get('clicks', 1)
         interval = params.get('interval', 0.1)
 
-        if x_raw is None or y_raw is None:
-            return {'success': False, 'message': '缺少坐标参数 (x, y)'}
+        # 解析坐标（支持 element_id 或 x/y）
+        x, y = self._resolve_element_coordinates(params)
 
-        # 标准化坐标
-        x, y = self._normalize_coordinates(x_raw, y_raw)
+        if x is None or y is None:
+            return {'success': False, 'message': '缺少坐标参数 (需要 element_id 或 x/y)'}
 
         try:
             # 移动鼠标到指定位置
@@ -207,13 +267,10 @@ class ActionModule:
 
     def _right_click(self, params: Dict) -> Dict:
         """右键点击"""
-        x_raw = params.get('x')
-        y_raw = params.get('y')
+        x, y = self._resolve_element_coordinates(params)
 
-        if x_raw is None or y_raw is None:
+        if x is None or y is None:
             return {'success': False, 'message': '缺少坐标参数'}
-
-        x, y = self._normalize_coordinates(x_raw, y_raw)
 
         try:
             pyautogui.moveTo(x, y, duration=0.5)
