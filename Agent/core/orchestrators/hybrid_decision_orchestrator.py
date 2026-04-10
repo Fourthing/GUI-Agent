@@ -26,7 +26,7 @@ class HybridDecisionOrchestrator:
         }
 
     def decide(self,
-               screenshot: Image.Image,
+               image_url: str,
                user_instruction: str,
                step_no: int = 1,
                task_id: str = None) -> dict:
@@ -37,11 +37,59 @@ class HybridDecisionOrchestrator:
         1. 使用 ACI 提取 UI 元素
         2. 将 UI 元素注入到 VLM prompt 中
         3. VLM 根据 UI 元素 + 截图做出决策
+
+        Args:
+            image_url: 屏幕截图 URL 或 Base64 字符串（与 VLMOrchestrator 保持一致）
+            user_instruction: 用户指令
+            step_no: 步骤编号（可选，默认 1）
+            task_id: 任务 ID（可选）
+
+        Returns:
+            dict: {
+                'success': bool,
+                'step_no': int,
+                'task_id': str,
+                'thought': str,
+                'action': str,
+                'parameters': dict,
+                'full_response': dict,
+                'decision_method': str,  # 新增：标识决策方式
+                'decision_time': float   # 新增：决策耗时
+            }
         """
         start_time = time.time()
         log_prefix = f"[Task:{task_id}] Step:{step_no}" if task_id else f"Step:{step_no}"
 
         print(f"\n{log_prefix} 🧠 [HybridDecision] 开始决策分析...")
+
+        # ========== Step 0: 将 image_url 转换为 PIL Image（用于 ACI 提取）==========
+        from PIL import Image
+        import io
+        import base64
+
+        try:
+            # 处理 data:image/png;base64, 前缀
+            if image_url.startswith('data:image'):
+                base64_data = image_url.split(',', 1)[1]
+            else:
+                base64_data = image_url
+
+            # 解码 Base64 为 PIL Image
+            screenshot = Image.open(io.BytesIO(base64.b64decode(base64_data)))
+        except Exception as e:
+            print(f"{log_prefix} ⚠️  图片解析失败：{e}")
+            return {
+                'success': False,
+                'error': f'图片解析失败：{str(e)}',
+                'thought': '',
+                'action': None,
+                'parameters': None,
+                'full_response': None,
+                'decision_method': 'error',
+                'decision_time': 0,
+                'step_no': step_no,
+                'task_id': task_id
+            }
 
         # ========== Step 1: 使用 ACI 提取 UI 元素 ==========
         print(f"{log_prefix} 🔍 [ACI] 正在提取 UI 元素...")
@@ -59,7 +107,7 @@ class HybridDecisionOrchestrator:
         print(f"{log_prefix} 🤖 [VLM] 调用 VLM 决策（含 UI 元素增强）...")
 
         vlm_result = self._vlm_decision_with_aci(
-            screenshot=screenshot,
+            image_url=image_url,  # ← 直接传递 image_url
             ui_elements=ui_elements,
             user_instruction=user_instruction,
             step_no=step_no,
@@ -82,7 +130,7 @@ class HybridDecisionOrchestrator:
         }
 
     def _vlm_decision_with_aci(self,
-                               screenshot: Image.Image,
+                               image_url: str,  # ← 改为接收 image_url
                                ui_elements: list,
                                user_instruction: str,
                                step_no: int,
@@ -93,13 +141,14 @@ class HybridDecisionOrchestrator:
         参考 PC-Agent 的设计：
         1. ACI 负责提取准确的 UI 结构
         2. VLM 负责智能决策（结合截图 + UI 元素列表）
+
+        Args:
+            image_url: 屏幕截图 URL 或 Base64 字符串
+            ui_elements: ACI 提取的 UI 元素列表
+            user_instruction: 用户指令
+            step_no: 步骤编号
+            task_id: 任务 ID
         """
-        from ..windows_aci import WindowsACI
-        from utils.screen_capture import ScreenCapturer
-
-        capturer = ScreenCapturer()
-        base64_image = capturer.pil_to_base64(screenshot)
-
         # 构建增强的 prompt，注入 UI 元素信息
         enhanced_instruction = user_instruction
 
@@ -135,9 +184,9 @@ class HybridDecisionOrchestrator:
 
             enhanced_instruction = user_instruction + ui_info
 
-        # 调用原始的 VLM 决策
+        # 调用原始的 VLM 决策（直接使用 image_url）
         result = self.vlm_orchestrator.decide(
-            image_url=f"data:image/png;base64,{base64_image}",
+            image_url=image_url,  # ← 直接传递，无需转换
             user_instruction=enhanced_instruction,
             step_no=step_no,
             task_id=task_id

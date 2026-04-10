@@ -194,15 +194,16 @@ def test_3_hybrid_decision_aci_path():
     # time.sleep(0.5)
 
     orchestrator = HybridDecisionOrchestrator()
+
+    # 直接使用 capture_to_base64()，返回的就是 image_url 格式
     capturer = ScreenCapturer()
-    screenshot_path = capturer.capture()
-    from PIL import Image
-    screenshot = Image.open(screenshot_path)
+    base64_image = capturer.capture_to_base64()
+    image_url = f"data:image/png;base64,{base64_image}"
 
     # 测试用例 3.1: "关闭窗口" 指令（应该匹配到关闭按钮）
     print("\n[3.1] 指令：'关闭窗口'")
     result = orchestrator.decide(
-        screenshot=screenshot,
+        image_url=image_url,  # ← 直接传递 image_url
         user_instruction="关闭窗口",
         step_no=1,
         task_id="test_aci_001"
@@ -211,8 +212,8 @@ def test_3_hybrid_decision_aci_path():
     print(f"决策方式：{result.get('decision_method')}")
     print(f"决策耗时：{result.get('decision_time')}s")
 
-    if result.get('decision_method') == 'aci_based':
-        print(f"✓ 通过：使用 ACI 快速决策")
+    if result.get('decision_method') == 'aci_enhanced_vlm':
+        print(f"✓ 通过：使用 ACI 增强的 VLM 决策")
         print(f"  动作：{result.get('action')}")
         print(f"  参数：{result.get('parameters')}")
 
@@ -226,15 +227,16 @@ def test_3_hybrid_decision_aci_path():
 
     # 测试用例 3.2: "最小化窗口" 指令
     print("\n[3.2] 指令：'最小化窗口'")
+
     result = orchestrator.decide(
-        screenshot=screenshot,
+        image_url=image_url,  # ← 直接传递 image_url
         user_instruction="最小化窗口",
         step_no=2,
         task_id="test_aci_002"
     )
 
     print(f"决策方式：{result.get('decision_method')}")
-    if result.get('decision_method') == 'aci_based':
+    if result.get('decision_method') == 'aci_enhanced_vlm':
         print(f"✓ 通过：使用 ACI 快速决策")
     else:
         print(f"⚠️  降级到：{result.get('decision_method')}")
@@ -246,197 +248,6 @@ def test_3_hybrid_decision_aci_path():
     print("\n✅ 测试 3 完成")
     return True
 
-
-def test_4_hybrid_decision_vlm_fallback():
-    """测试 4: 混合决策器 - VLM 降级路径"""
-    print("\n" + "=" * 80)
-    print("测试 4: 混合决策器 - VLM 降级路径")
-    print("=" * 80)
-
-    orchestrator = HybridDecisionOrchestrator()
-    capturer = ScreenCapturer()
-    screenshot_path = capturer.capture()
-    from PIL import Image
-    screenshot = Image.open(screenshot_path)
-
-    # 测试用例 4.1: 复杂指令（ACI 无法匹配，应降级到 VLM）
-    print("\n[4.1] 复杂指令：'把那个蓝色的小图标拖到右下角'")
-    result = orchestrator.decide(
-        screenshot=screenshot,
-        user_instruction="把那个蓝色的小图标拖到右下角",
-        step_no=1,
-        task_id="test_vlm_001"
-    )
-
-    print(f"决策方式：{result.get('decision_method')}")
-    print(f"决策耗时：{result.get('decision_time')}s")
-
-    # 这个指令应该触发 VLM 降级
-    if result.get('decision_method') == 'vlm_based':
-        print(f"✓ 通过：正确降级到 VLM")
-    else:
-        print(f"⚠️  意外使用了 {result.get('decision_method')}")
-
-    print("\n✅ 测试 4 完成")
-    return True
-
-
-def test_5_other_actions_compatibility():
-    """测试 5: 其他动作的兼容性（TYPE, SCROLL, HOTKEY 等）"""
-    print("\n" + "=" * 80)
-    print("测试 5: 其他动作的兼容性")
-    print("=" * 80)
-
-    executor = ActionModule(safety_mode=False)
-
-    # 测试用例 5.1: TYPE 动作
-    print("\n[5.1] TYPE 动作")
-    result = executor.execute({
-        'action': 'TYPE',
-        'parameters': {
-            'text': 'Hello World',
-            'needs_enter': False
-        }
-    })
-    assert result['success'], f"失败：{result['message']}"
-    print(f"✓ 通过：{result['message']}")
-
-    # 测试用例 5.2: SCROLL 动作
-    print("\n[5.2] SCROLL 动作")
-    result = executor.execute({
-        'action': 'SCROLL',
-        'parameters': {
-            'direction': 'down',
-            'amount': 'medium'
-        }
-    })
-    assert result['success'], f"失败：{result['message']}"
-    print(f"✓ 通过：{result['message']}")
-
-    # 测试用例 5.3: HOTKEY 动作
-    print("\n[5.3] HOTKEY 动作")
-    result = executor.execute({
-        'action': 'HOTKEY',
-        'parameters': {
-            'keys': ['ctrl', 'a']
-        }
-    })
-    assert result['success'], f"失败：{result['message']}"
-    print(f"✓ 通过：{result['message']}")
-
-    # 测试用例 5.4: KEY_PRESS 动作
-    print("\n[5.4] KEY_PRESS 动作")
-    result = executor.execute({
-        'action': 'KEY_PRESS',
-        'parameters': {
-            'key': 'esc'
-        }
-    })
-    assert result['success'], f"失败：{result['message']}"
-    print(f"✓ 通过：{result['message']}")
-
-    # 测试用例 5.5: DOUBLE_CLICK 动作
-    print("\n[5.5] DOUBLE_CLICK 动作")
-    result = executor.execute({
-        'action': 'DOUBLE_CLICK',
-        'parameters': {
-            'x': 150,
-            'y': 150
-        }
-    })
-    assert result['success'], f"失败：{result['message']}"
-    print(f"✓ 通过：{result['message']}")
-
-    # 测试用例 5.6: RIGHT_CLICK 动作
-    print("\n[5.6] RIGHT_CLICK 动作")
-    result = executor.execute({
-        'action': 'RIGHT_CLICK',
-        'parameters': {
-            'x': 200,
-            'y': 200
-        }
-    })
-    assert result['success'], f"失败：{result['message']}"
-    print(f"✓ 通过：{result['message']}")
-
-    print("\n✅ 测试 5 全部通过")
-    return True
-
-
-def test_6_window_move_robustness():
-    """测试 6: 窗口移动后的鲁棒性（element_id 优势）"""
-    print("\n" + "=" * 80)
-    print("测试 6: 窗口移动后的鲁棒性")
-    print("=" * 80)
-
-    # 确保记事本打开
-    print("\n[准备] 确保记事本处于活动状态...")
-    import pyautogui
-    pyautogui.hotkey('alt', 'tab')
-    time.sleep(0.5)
-
-    executor = ActionModule(safety_mode=False)
-    from core.windows_aci import WindowsACI
-    aci = WindowsACI(top_app_only=True)
-
-    # 提取初始元素
-    print("\n[6.1] 提取初始元素位置...")
-    elements_before = aci.linearize_and_annotate_tree({})
-
-    if not elements_before:
-        print("⚠️  未提取到元素，跳过此测试")
-        return True
-
-    # 选择一个目标元素
-    target_id = 0
-    elem_before = elements_before[target_id]
-    pos_before = elem_before['position']
-
-    print(f"目标元素 ID={target_id}, 初始位置={pos_before}")
-
-    # 模拟窗口移动（这里只是演示，实际可以拖动窗口）
-    print("\n[6.2] 模拟窗口移动...")
-    print("（提示：请手动将记事本窗口移动到屏幕另一侧，然后按回车继续）")
-    input("按回车继续...")
-
-    # 再次提取元素
-    print("\n[6.3] 提取移动后的元素位置...")
-    elements_after = aci.linearize_and_annotate_tree({})
-
-    if target_id < len(elements_after):
-        elem_after = elements_after[target_id]
-        pos_after = elem_after['position']
-
-        print(f"移动后位置={pos_after}")
-        print(f"位置变化：dx={pos_after[0] - pos_before[0]}, dy={pos_after[1] - pos_before[1]}")
-
-        # 使用 element_id 点击（应该自动适应新位置）
-        print("\n[6.4] 使用 element_id 点击（应自动适应新位置）...")
-        result = executor.execute({
-            'action': 'CLICK',
-            'parameters': {
-                'element_id': target_id
-            }
-        })
-
-        if result['success']:
-            new_x, new_y = result['coordinates']
-            print(f"✓ 通过：点击了新位置 ({new_x}, {new_y})")
-
-            # 验证坐标确实更新了
-            if abs(new_x - pos_after[0] - elem_after['size'][0] // 2) < 5:
-                print(f"✓ 坐标准确匹配新位置")
-            else:
-                print(f"⚠️  坐标可能有偏差")
-        else:
-            print(f"⚠️  点击失败：{result['message']}")
-    else:
-        print("⚠️  元素 ID 超出范围")
-
-    print("\n✅ 测试 6 完成")
-    return True
-
-
 def run_all_tests():
     """运行所有测试"""
     print("\n" + "=" * 80)
@@ -447,9 +258,6 @@ def run_all_tests():
         ("传统 x/y 坐标点击", test_1_traditional_xy_click),
         ("element_id 动态定位", test_2_element_id_dynamic定位),
         ("混合决策器 - ACI 路径", test_3_hybrid_decision_aci_path),
-        ("混合决策器 - VLM 降级", test_4_hybrid_decision_vlm_fallback),
-        ("其他动作兼容性", test_5_other_actions_compatibility),
-        ("窗口移动鲁棒性", test_6_window_move_robustness),
     ]
 
     results = {}

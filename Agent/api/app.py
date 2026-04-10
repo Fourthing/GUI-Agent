@@ -12,7 +12,7 @@ from utils.database import db
 # 添加父目录（Agent）到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.orchestrators.decision_orchestrator import DecisionOrchestrator
+from core.orchestrators.hybrid_decision_orchestrator import HybridDecisionOrchestrator
 from core.orchestrators.planning_orchestrators import TaskPlanner
 from core.orchestrators.reflect_orchestrators import ReflectAgent
 from utils.screen_capture import ScreenCapturer
@@ -28,7 +28,7 @@ app = Flask(__name__)
 CORS(app)
 
 # 初始化决策编排器
-decision_orchestrator = DecisionOrchestrator()
+decision_orchestrator = HybridDecisionOrchestrator()
 
 
 @app.route('/api/execute', methods=['POST'])
@@ -88,13 +88,12 @@ def execute():
 
         # ========== 步骤 4: VLM 决策（使用 base64 data URL，避免网络延迟）==========
         print("\n🧠 [Decision] 正在分析...")
-        orchestrator = DecisionOrchestrator()
 
         # 构造 base64 data URL 格式（ModelScope 支持）
         image_data_url = f"data:image/png;base64,{screenshot_base64}"
 
         start_time = time.time()
-        decision_result = orchestrator.decide(
+        decision_result = decision_orchestrator.decide(
             image_url=image_data_url,  # 使用 base64 格式，无需下载
             user_instruction=final_prompt
         )
@@ -395,7 +394,6 @@ def decision():
 
             # 4. VLM 决策
             print(f"{log_prefix} 🧠 [Decision] 正在分析...")
-            orchestrator = DecisionOrchestrator()
 
             image_data_url = f"data:image/png;base64,{before_screenshot_base64}"
 
@@ -416,7 +414,7 @@ def decision():
                 user_instruction_for_vlm = prompt
 
             decision_start = time.time()
-            decision_result = orchestrator.decide(
+            decision_result = decision_orchestrator.decide(
                 image_url=image_data_url,
                 user_instruction=user_instruction_for_vlm,
                 step_no=step_no,
