@@ -40,88 +40,45 @@ class ReflectAgent:
         self.system_prompt = '''你是一名专业的 GUI 操作验证专家。你的任务是通过对比操作前后的屏幕截图，判断某个 GUI 操作是否真正达成了预期目标。
 
 ## 核心职责
-1. 精确识别两张截图的所有差异
-2. 判断这些差异是否符合操作的预期结果
-3. 给出明确的验证结论和建议
+1. 对比两张截图的 UI 元素列表和视觉内容
+2. 判断操作是否达成了**用户指令的实际目标**
+3. 给出明确的验证结论（A/B/C/D）
 
-## 验证状态说明
-你必须根据以下标准判断操作结果：
+## 验证状态说明（仅 4 种）
 
 ### A - 成功 (Success)
-- 操作完全达成预期目标
-- 屏幕变化符合预期
-- 没有发现任何错误或异常
+操作完全达成用户指令的目标，屏幕变化符合预期。
 
 **示例**: 
-- 点击按钮后，预期的窗口打开了
-- 输入文字后，文本正确显示在输入框中
-- 关闭窗口后，窗口确实消失了
+- 用户要"关闭窗口" → 窗口确实消失了
+- 用户要"输入 Hello" → 文本框中显示了 "Hello"
 
 ### B - 错误状态 (Error Page/State)
-- 进入了错误页面或异常状态
-- 出现错误提示、崩溃弹窗、404 页面等
-- 系统报告了某种错误
-
-**示例**:
-- 访问网页时出现 404 错误
-- 应用程序崩溃弹窗
-- 网络连接失败提示
+进入了错误页面或异常状态（404、崩溃弹窗、网络错误等）。
 
 ### C - 无变化 (No Change)
-- 两张截图几乎完全相同
-- 没有检测到明显的视觉变化
-- 可能操作未生效或点错了位置
-
-**示例**:
-- 点击按钮但界面毫无反应
-- 输入文字但没有显示
-- 操作前后屏幕完全一样
+两张截图几乎完全相同，操作未生效。
 
 ### D - 未完成 (Incomplete)
-- 操作本身执行了，但没有完全达成目标
-- 只完成了部分步骤，还需要后续操作
-- 偏离了预期的结果
+操作执行了，但用户指令的目标**未达成**。
+例如：点击了错误的按钮、输入了错误的位置、只完成了部分步骤。
 
-**示例**:
-- 输入了搜索词但没按回车（需要补充 Press Enter）
-- 打开了菜单但没点击子项（需要补充点击）
-- 复制了文字但没粘贴（需要补充 Paste）
+## 输出格式（严格遵循）
+你必须按照以下格式输出，不要添加任何额外内容：
 
-### E - 部分成功 (Partial Success)
-- 主要目标达成了，但有一些小问题
-- 可以继续进行下一步，不需要立即纠正
-- 不影响整体流程
+### Thought ###
+在这里详细分析：
+1. 操作前后的关键差异是什么
+2. 这些差异是否符合操作的预期
+3. 用户指令的目标是否真正达成
 
-**示例**:
-- 成功打开窗口但位置不太对
-- 文字输入正确但格式略有偏差
-- 功能激活了但有额外的提示框
+### Answer ###
+A 或 B 或 C 或 D（只能选一个字母）
 
-## 输出格式要求
-你必须输出一个严格的 JSON 对象，包含以下字段：
-
-{
-    "status": "A|B|C|D|E",           // 必须是大写字母
-    "success": true/false,            // 是否成功（A 和 E 为 true）
-    "changes_detected": [             // 检测到的变化列表
-        "变化 1 描述",
-        "变化 2 描述"
-    ],
-    "analysis": "详细分析过程...",    // 200 字以内的分析
-    "suggestion": "下一步建议..."     // 如果失败，建议如何纠正
-}
-
-## 关键判断逻辑
-1. 首先检查是否有明显错误（状态 B）
-2. 然后检查是否完全无变化（状态 C）
-3. 接着检查是否完全达成目标（状态 A）
-4. 如果只完成了一部分，区分是 D（需要纠正）还是 E（可以继续）
-
-## 注意事项
-- 关注关键的 UI 元素变化，忽略无关的细节
-- 对于状态 D 和 E，要明确说明还需要什么操作
-- 置信度要客观反映你的判断把握
-- 建议要具体可执行，不要模糊其词'''
+## 关键判断原则
+1. **关注用户目标**：不是"屏幕有没有变化"，而是"用户想要的结果出现了吗"
+2. **结合 UI 元素**：优先使用提供的 UI 元素列表进行精确对比
+'''
 
     def verify(self,
                before_base64: str,
@@ -129,6 +86,8 @@ class ReflectAgent:
                action: str,
                parameters: dict,
                step_instruction: str,
+               before_ui_elements: list = None,
+               after_ui_elements: list = None,
                context: dict = None) -> dict:
         """
         验证 GUI 操作是否成功
@@ -139,6 +98,8 @@ class ReflectAgent:
             action: 执行的动作类型（CLICK/TYPE/SCROLL 等）
             parameters: 动作的参数（坐标、文本等）
             step_instruction: 当前步骤的指令描述
+            before_ui_elements: 操作前的 UI 元素列表（可选）
+            after_ui_elements: 操作后的 UI 元素列表（可选）
             context: 额外上下文信息（可选）
 
         Returns:
@@ -158,6 +119,8 @@ class ReflectAgent:
                 action=action,
                 parameters=parameters,
                 step_instruction=step_instruction,
+                before_ui_elements=before_ui_elements,
+                after_ui_elements=after_ui_elements,
                 context=context
             )
 
@@ -191,9 +154,10 @@ class ReflectAgent:
             ]
 
             # 调用 DeepSeek-V3 进行验证
+            # 调用 VLM 进行验证（使用与决策相同的模型）
             response = self.client.chat.completions.create(
-                model='deepseek-ai/DeepSeek-V3.2',
-                messages=messages
+                model='iic/GUI-Owl-7B',  # 改为与决策相同的模型
+                messages=messages,
             )
 
             # 解析响应
@@ -218,6 +182,8 @@ class ReflectAgent:
                       action: str,
                       parameters: dict,
                       step_instruction: str,
+                      before_ui_elements: list = None,
+                      after_ui_elements: list = None,
                       context: dict = None) -> str:
         """
         构建验证 prompt

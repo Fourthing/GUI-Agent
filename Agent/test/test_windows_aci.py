@@ -23,7 +23,7 @@ def test_basic_extraction():
     print(f"\n✓ 提取到 {len(elements)} 个元素\n")
 
     # 打印前 10 个元素
-    for i, elem in enumerate(elements[:10]):
+    for i, elem in enumerate(elements[:500]):
         print(f"[{i}] role={elem['role']}, title={elem['title']}, "
               f"text={elem['text']}, pos={elem['position']}, size={elem['size']}")
 

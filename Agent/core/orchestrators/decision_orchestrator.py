@@ -1,6 +1,7 @@
 from openai import OpenAI
 import os
 import json
+import time
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -19,6 +20,8 @@ class DecisionOrchestrator:
             base_url='https://api-inference.modelscope.cn/v1',
             api_key=modelscope_token,
         )
+
+        self.operation_history = []
 
     def decide(self, image_url: str, user_instruction: str, step_no: int = 1, task_id: str = None) -> dict:
         """
@@ -41,6 +44,7 @@ class DecisionOrchestrator:
                 'full_response': dict
             }
         """
+        start_time = time.time()
         log_prefix = f"[Task:{task_id}] Step:{step_no}" if task_id else f"Step:{step_no}"
 
         # ========== 获取屏幕分辨率（新增！）==========
@@ -52,13 +56,13 @@ class DecisionOrchestrator:
                 "role": "system",
                 "content": '''
 ## 1. 核心角色 (Core Role)
-你是一个顶级的 AI 视觉操作代理。你的任务是分析电脑屏幕截图，理解用户的指令（user_instruction），然后将任务分解为单一、精确的 GUI 原子操作。
+你是一个顶级的 AI 视觉操作代理。你的任务是结合UI元素列表分析电脑屏幕截图，理解用户的指令（user_instruction），然后将任务分解为单一、精确的 GUI 原子操作。（优先使用快捷键和UI元素进行操作）
 
 ## 2. [CRITICAL] JSON Schema & 绝对规则
 你的输出**必须**是一个严格符合以下规则的 JSON 对象。
 - **[R1] 严格的 JSON**: 回复必须是且只能是一个 JSON 对象，禁止添加额外文本。
 - **[R2] thought 结构**: "在这里描述思考过程。例如：用户想打开浏览器，我看到了 Chrome 图标，所以下一步是点击它。"
-- **[R3] Action 值**: 必须为大写字符串（如 "CLICK", "TYPE"）。优先使用快捷键进行操作。
+- **[R3] Action 值**: 必须为大写字符串（如 "CLICK", "TYPE"）。
 - **[R4] parameters 结构**: 优先使用element_Id（UI元素列表内的ID），否则必须与工具集中的模板完全一致。
 
 ## 3. 工具集 (Available Actions)
@@ -123,23 +127,36 @@ class DecisionOrchestrator:
         ]
 
         try:
+            print(f"{log_prefix} ⏱️  [VLM] 开始调用 ModelScope API...")
+            api_start_time = time.time()
+
             completion = self.client.chat.completions.create(
                 model='iic/GUI-Owl-7B',
                 messages=messages
             )
 
+            api_elapsed = time.time() - api_start_time
+            print(f"{log_prefix} ⏱️  [VLM] API 响应耗时：{api_elapsed:.2f}s")
+
             response_content = completion.choices[0].message.content.strip()
             print(f"{log_prefix} VLM 原始响应：{response_content}")
 
             # 解析 JSON 响应
+            parse_start_time = time.time()
             if response_content.startswith('```json'):
                 response_content = response_content[7:]
             if response_content.endswith('```'):
                 response_content = response_content[:-3]
             response_content = response_content.strip()
             action_json = json.loads(response_content)
+            parse_elapsed = time.time() - parse_start_time
 
             print(f"{log_prefix} 解析成功的动作：{action_json}")
+            print(f"{log_prefix} ⏱️  [JSON] 解析耗时：{parse_elapsed:.3f}s")
+            print(f"{log_prefix} 解析成功的动作：{action_json}")
+
+            total_elapsed = time.time() - start_time
+            print(f"{log_prefix} ⏱️  [总计] decide() 总耗时：{total_elapsed:.2f}s\n")
 
             return {
                 'success': True,
@@ -152,7 +169,8 @@ class DecisionOrchestrator:
             }
 
         except Exception as e:
-            print(f"{log_prefix} 调用失败：{e}")
+            total_elapsed = time.time() - start_time
+            print(f"{log_prefix} ❌ 调用失败（耗时 {total_elapsed:.2f}s）：{e}")
             return {
                 'success': False,
                 'step_no': step_no,

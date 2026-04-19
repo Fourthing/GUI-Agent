@@ -88,9 +88,9 @@ def test_2_element_id_dynamic定位():
     print("=" * 80)
 
     # 打开记事本作为测试目标
-    print("\n[准备] 打开记事本...")
-    subprocess.Popen("notepad.exe")
-    time.sleep(1.5)
+    # print("\n[准备] 打开记事本...")
+    # subprocess.Popen("notepad.exe")
+    # time.sleep(1.5)
 
     # 切换到记事本
     import pyautogui

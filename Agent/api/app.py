@@ -6,7 +6,7 @@ import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor,TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from utils.database import db
 
 # 添加父目录（Agent）到 Python 路径
@@ -22,7 +22,6 @@ load_dotenv()
 
 # 创建线程池用于异步上传（最多 3 个并发任务）
 upload_executor = ThreadPoolExecutor(max_workers=3)
-
 
 app = Flask(__name__)
 CORS(app)
@@ -145,6 +144,7 @@ def execute():
             'success': False,
             'error': error_msg
         }), 500
+
 
 @app.route('/api/plan', methods=['POST'])
 def plan_task():
@@ -269,11 +269,22 @@ def decision():
 
     完整流程：
     1. 初始化数据库记录（任务 + 步骤）
-    2. 循环：截图 → 决策 → 执行 → Reflect 验证
-    3. 每次尝试都记录到数据库
-    4. 根据最终结果更新数据库状态
+    2. 【新增】如果使用规划模块，先拆分任务
+    3. 循环：截图 → 决策 → 执行 → Reflect 验证
+    4. 每次尝试都记录到数据库
+    5. 根据最终结果更新数据库状态
     """
     try:
+        # 进行操作前先点击屏幕右下角回到桌面避免原始状态的干扰
+        import pyautogui
+        pyautogui.FAILSAFE = False
+        # 获取屏幕尺寸
+        width, height = pyautogui.size()
+        # duration=0.1 避免对瞬时移动不敏感
+        pyautogui.moveTo(x=width, y=height, duration=0.1)
+        pyautogui.click()
+        pyautogui.FAILSAFE = True
+
         data = request.get_json()
 
         if not data or 'prompt' not in data:
@@ -287,13 +298,15 @@ def decision():
         step_no = data.get('step_no', 1)
         auto_execute = data.get('auto_execute', True)
         safety_mode = data.get('safety_mode', False)
-        max_retries = data.get('max_retries', 2)
+        max_retries = data.get('max_retries', 1)
+        use_planning = data.get('use_planning', True)
 
         log_prefix = f"[Task:{task_id}] Step:{step_no}" if task_id else f"Step:{step_no}"
 
         print(f"\n{'=' * 60}")
         print(f"[API] 📥 收到决策请求")
         print(f"{log_prefix} 指令：{prompt}")
+        print(f"{log_prefix} 使用规划：{'是' if use_planning else '否'}")
         print(f"{'=' * 60}\n")
 
         # ========== 步骤 A: 初始化数据库记录 ==========
@@ -480,7 +493,8 @@ def decision():
                     print(f"{log_prefix} 参数：{parameters}")
 
                     from core.action_module import ActionModule
-                    executor = ActionModule(safety_mode=safety_mode)
+                    # executor = ActionModule(safety_mode=safety_mode)
+                    executor = ActionModule()
                     execution_result = executor.execute(action_data)
 
                     if execution_result.get('success'):
@@ -815,4 +829,3 @@ def health_check():
         'service': 'GUI-Agent Decision API',
         'timestamp': time.time()
     }), 200
-

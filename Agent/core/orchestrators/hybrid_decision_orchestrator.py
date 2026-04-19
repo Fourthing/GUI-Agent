@@ -25,6 +25,9 @@ class HybridDecisionOrchestrator:
             'total_decisions': 0
         }
 
+        # 操作历史记录（用于多步任务上下文）
+        self.operation_history = []
+
     def decide(self,
                image_url: str,
                user_instruction: str,
@@ -93,9 +96,12 @@ class HybridDecisionOrchestrator:
 
         # ========== Step 1: 使用 ACI 提取 UI 元素 ==========
         print(f"{log_prefix} 🔍 [ACI] 正在提取 UI 元素...")
+        aci_start_time = time.time()
 
         obs = {'screenshot': screenshot}
         ui_elements = self.aci.linearize_and_annotate_tree(obs)
+
+        aci_elapsed = time.time() - aci_start_time
 
         if not ui_elements:
             print(f"{log_prefix} ⚠️  [ACI] 未提取到元素，使用纯视觉决策")
@@ -105,6 +111,7 @@ class HybridDecisionOrchestrator:
 
         # ========== Step 2: 调用 VLM 决策（注入 UI 元素信息）==========
         print(f"{log_prefix} 🤖 [VLM] 调用 VLM 决策（含 UI 元素增强）...")
+        vlm_call_start = time.time()
 
         vlm_result = self._vlm_decision_with_aci(
             image_url=image_url,  # ← 直接传递 image_url
@@ -114,12 +121,26 @@ class HybridDecisionOrchestrator:
             task_id=task_id
         )
 
+        vlm_call_elapsed = time.time() - vlm_call_start
+        print(f"{log_prefix} ⏱️  [VLM调用] _vlm_decision_with_aci() 耗时：{vlm_call_elapsed:.2f}s")
+
         decision_time = time.time() - start_time
 
         self.stats['vlm_based_decisions'] += 1
         self.stats['total_decisions'] += 1
 
-        print(f"{log_prefix} 🤖 [VLM] VLM 决策完成 (耗时：{decision_time:.2f}s)")
+        # 记录本次决策到历史
+        if vlm_result.get('success'):
+            self.operation_history.append({
+                'step_no': step_no,
+                'action': vlm_result.get('action'),
+                'parameters': vlm_result.get('parameters'),
+                'thought': vlm_result.get('thought'),
+                'success': None  # 执行成功后再更新
+            })
+
+        print(f"{log_prefix} 🤖 [VLM] VLM 决策完成 (总耗时：{decision_time:.2f}s)")
+        print(f"{log_prefix} 📊 [性能分析] ACI: {aci_elapsed:.2f}s | VLM: {vlm_call_elapsed:.2f}s | 总计: {decision_time:.2f}s\n")
 
         return {
             **vlm_result,
@@ -149,6 +170,8 @@ class HybridDecisionOrchestrator:
             step_no: 步骤编号
             task_id: 任务 ID
         """
+        prompt_build_start = time.time()
+
         # 构建增强的 prompt，注入 UI 元素信息
         enhanced_instruction = user_instruction
 
@@ -183,6 +206,26 @@ class HybridDecisionOrchestrator:
             ui_info += "4. 如果找不到合适的 element_id，再使用 x/y 坐标\n"
 
             enhanced_instruction = user_instruction + ui_info
+        if self.operation_history:
+            history_text = "\n\n【历史操作记录】\n"
+            history_text += "在执行当前操作之前，你已经完成了以下步骤：\n"
+
+            for i, record in enumerate(self.operation_history[-5:], 1):  # 只保留最近 5 条
+                action = record.get('action', '未知')
+                params = record.get('parameters', {})
+                thought = record.get('thought', '')[:50]  # 截断过长的思考
+
+                history_text += f"步骤 {i}: {action} (参数: {params})\n"
+                if thought:
+                    history_text += f"  思考: {thought}...\n"
+
+            history_text += "\n请根据当前屏幕状态和历史操作，决定下一步行动。\n"
+
+            enhanced_instruction += history_text
+
+        prompt_build_elapsed = time.time() - prompt_build_start
+        log_prefix = f"[Task:{task_id}] Step:{step_no}" if task_id else f"Step:{step_no}"
+        print(f"{log_prefix} ⏱️  [Prompt] 构建耗时：{prompt_build_elapsed:.3f}s | 长度：{len(enhanced_instruction)} 字符")
 
         # 调用原始的 VLM 决策（直接使用 image_url）
         result = self.vlm_orchestrator.decide(
