@@ -63,12 +63,20 @@ class DecisionOrchestrator:
 - **[R1] 严格的 JSON**: 回复必须是且只能是一个 JSON 对象，禁止添加额外文本。
 - **[R2] thought 结构**: "在这里描述思考过程。例如：用户想打开浏览器，我看到了 Chrome 图标，所以下一步是点击它。"
 - **[R3] Action 值**: 必须为大写字符串（如 "CLICK", "TYPE"）。
-- **[R4] parameters 结构**: 优先使用element_Id（UI元素列表内的ID），否则必须与工具集中的模板完全一致。
+- **[R4] parameters 结构**: 优先使用element_id（UI元素列表内的ID），否则必须与工具集中的模板完全一致。
 
 ## 3. 工具集 (Available Actions)
 ### CLICK
 - **功能**: 单击屏幕。
 - **Parameters 模板**: {"x": <integer>, "y": <integer>, "description": "<string, optional>"}
+
+### DOUBLE_CLICK
+- **功能**: 双击屏幕（用于打开应用、文件等）。
+- **Parameters 模板**: {"x": <integer>, "y": <integer>}
+
+### RIGHT_CLICK
+- **功能**: 右键点击（用于打开上下文菜单）。
+- **Parameters 模板**: {"x": <integer>, "y": <integer>}
 
 ### TYPE
 - **功能**: 输入文本。
@@ -81,6 +89,14 @@ class DecisionOrchestrator:
 ### KEY_PRESS
 - **功能**: 按下功能键。
 - **Parameters 模板**: {"key": "<string: e.g., 'enter', 'esc'>"}
+
+### HOTKEY
+- **功能**: 按下组合键（快捷键）。
+- **Parameters 模板**: {"keys": ["<string>", ...], "e.g., ['ctrl', 'c']"}
+
+### DRAG_TO
+- **功能**: 拖拽操作。
+- **Parameters 模板**: {"startX": <integer>, "startY": <integer>, "endX": <integer>, "endY": <integer>}
 
 ### FINISH
 - **功能**: 任务成功完成。

@@ -202,6 +202,15 @@ def plan_task():
         task_db_record = None
         step_db_ids = []
 
+        # 进行操作前先点击屏幕右下角回到桌面避免原始状态的干扰
+        import pyautogui
+        pyautogui.FAILSAFE = False
+        # 获取屏幕尺寸
+        width, height = pyautogui.size()
+        pyautogui.moveTo(x=width-1, y=height-1, duration=1)
+        pyautogui.click()
+        pyautogui.click()
+
         try:
             # 创建任务执行记录
             task_db_record = db.create_task(
@@ -275,16 +284,6 @@ def decision():
     5. 根据最终结果更新数据库状态
     """
     try:
-        # 进行操作前先点击屏幕右下角回到桌面避免原始状态的干扰
-        import pyautogui
-        pyautogui.FAILSAFE = False
-        # 获取屏幕尺寸
-        width, height = pyautogui.size()
-        # duration=0.1 避免对瞬时移动不敏感
-        pyautogui.moveTo(x=width, y=height, duration=0.1)
-        pyautogui.click()
-        pyautogui.FAILSAFE = True
-
         data = request.get_json()
 
         if not data or 'prompt' not in data:
@@ -602,10 +601,6 @@ def decision():
                             print(f"\n{log_prefix} ⚠️ 操作完成但目标未达成：{reflect_result['suggestion']}")
                             retry_count += 1
                             last_error_reason = f"未完成：{reflect_result['suggestion']}"
-
-                        elif reflect_result['status'] == 'E':
-                            print(f"\n{log_prefix} ✅ 部分成功，可以继续：{reflect_result['analysis']}")
-                            final_execution_result = execution_result
 
                             # 记录部分成功的结果
                             if step_db_id and decision_db_id is None:

@@ -15,8 +15,8 @@ class ActionModule:
         self.safety_mode = safety_mode
 
         # 配置 PyAutoGUI
-        pyautogui.FAILSAFE = True  # 鼠标移到角落可中断
-        pyautogui.PAUSE = 0.3  # 操作间隔（缩短到 0.3s）
+        pyautogui.FAILSAFE = False  # 鼠标移到角落不可中断
+        pyautogui.PAUSE = 0.5  # 操作间隔（缩短到 0.5s）
 
         # 初始化 ACI（用于 element_id 动态定位）
         try:

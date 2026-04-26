@@ -181,8 +181,8 @@ class HybridDecisionOrchestrator:
             ui_info += "格式：ID | 角色 | 标题/文本 | 位置\n"
             ui_info += "-" * 80 + "\n"
 
-            # 限制显示的元素数量（避免 prompt 过长）
-            max_elements = 50
+            # 限制显示的元素数量
+            max_elements = 500
             displayed_elements = ui_elements[:max_elements]
 
             for idx, elem in enumerate(displayed_elements):
@@ -206,6 +206,8 @@ class HybridDecisionOrchestrator:
             ui_info += "4. 如果找不到合适的 element_id，再使用 x/y 坐标\n"
 
             enhanced_instruction = user_instruction + ui_info
+
+            # 新增：注入操作历史和反思（PC-Agent 风格）
         if self.operation_history:
             history_text = "\n\n【历史操作记录】\n"
             history_text += "在执行当前操作之前，你已经完成了以下步骤：\n"
@@ -218,6 +220,32 @@ class HybridDecisionOrchestrator:
                 history_text += f"步骤 {i}: {action} (参数: {params})\n"
                 if thought:
                     history_text += f"  思考: {thought}...\n"
+
+                # ✅ 关键改进：如果有 Reflect 结果，注入反思内容
+                reflect_status = record.get('reflect_status')
+                reflect_analysis = record.get('reflect_analysis', '')
+
+                if reflect_status:
+                    status_desc = {
+                        'A': '✅ 成功',
+                        'B': '❌ 进入错误页面',
+                        'C': '⚠️ 屏幕无变化',
+                        'D': '⚠️ 操作完成但目标未达成'
+                    }
+                    history_text += f"  验证结果: {status_desc.get(reflect_status, '未知')}\n"
+                    if reflect_analysis:
+                        # 截断过长的分析
+                        analysis_preview = reflect_analysis[:100] + ('...' if len(reflect_analysis) > 100 else '')
+                        history_text += f"  反思: {analysis_preview}\n"
+
+            # ✅ 如果最后一步失败，添加特殊提示（PC-Agent 风格）
+            if self.operation_history:
+                last_record = self.operation_history[-1]
+                if last_record.get('reflect_status') in ['B', 'C', 'D']:
+                    history_text += "\n【重要提示】\n"
+                    history_text += "上一步操作未能达成目标。请仔细分析失败原因，\n"
+                    history_text += "并尝试使用不同的方法来完成任务。\n"
+                    history_text += "例如：如果单击无效，可以尝试双击；如果点击位置不对，可以重新选择元素。\n"
 
             history_text += "\n请根据当前屏幕状态和历史操作，决定下一步行动。\n"
 
