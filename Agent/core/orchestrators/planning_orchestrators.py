@@ -3,18 +3,24 @@
 使用 DeepSeek-V3 模型将复杂指令分解为多个可执行的步骤
 支持显示思考过程
 """
+import json
+import os
 import time
 
 from openai import OpenAI
-import os
-import json
 from dotenv import load_dotenv
+from utils.prompt_loader import prompt_loader
 
 load_dotenv()
 
 
 class TaskPlanner:
     """任务规划器：将复杂指令分解为步骤序列"""
+
+    # 配置常量
+    API_RESPONSE_DELAY = 0.5  # API 响应后的延迟时间（秒）
+    INSTRUCTION_PREVIEW_LENGTH = 60  # 步骤描述预览长度
+    MAX_STEPS_DISPLAY = 15  # 最大步骤数参考值
 
     def __init__(self, show_thinking: bool = True):
         """
@@ -33,48 +39,6 @@ class TaskPlanner:
             base_url='https://api-inference.modelscope.cn/v1',
             api_key=llm_token,
         )
-
-        self.system_prompt = '''你是一名 GUI 操作助手的任务规划专家。你的任务是将用户的复杂指令分解为一系列简单的、可执行的 GUI 原子操作步骤。
-
-## 核心原则
-1. 每个步骤必须是单一、明确的操作（点击、输入、滚动等）
-2. 步骤之间要有逻辑顺序和因果关系
-3. 步骤描述要清晰具体，适合视觉模型理解
-4. 考虑操作的上下文和前置条件
-5. 通常 1-15 个步骤完成一个复杂任务
-
-## 输出格式要求
-你必须输出一个 JSON 数组，每个元素包含以下字段：
-{
-    "step": <序号，从 1 开始>,
-    "instruction": "<清晰的步骤描述，包含具体的 UI 元素和操作>",
-    "expected_action": "<预期的动作类型：CLICK/TYPE/SCROLL/KEY_PRESS/FINISH/DOUBLE_CLICK/RIGHT_CLICK/DRAG_TO/HOTKEY>"
-}
-
-## 示例 1
-用户：打开浏览器，搜索人工智能，下载第一张图片
-输出：
-[
-    {"step": 1, "instruction": "双击桌面上的 Chrome 浏览器图标", "expected_action": "CLICK"},
-    {"step": 2, "instruction": "等待浏览器完全加载后，在地址栏中输入 baidu.com 并按回车", "expected_action": "TYPE"},
-    {"step": 3, "instruction": "在百度搜索框中输入'人工智能'", "expected_action": "TYPE"},
-    {"step": 4, "instruction": "点击百度一下按钮进行搜索", "expected_action": "CLICK"},
-    {"step": 5, "instruction": "在搜索结果页面点击'图片'分类标签", "expected_action": "CLICK"},
-    {"step": 6, "instruction": "右键点击第一张图片，在弹出菜单中选择'图片另存为'", "expected_action": "CLICK"}
-]
-
-## 示例 2
-用户：帮我创建一个 PPT，第一页标题是'工作总结'
-输出：
-[
-    {"step": 1, "instruction": "点击开始菜单或桌面搜索框", "expected_action": "CLICK"},
-    {"step": 2, "instruction": "输入'PowerPoint'并点击打开应用", "expected_action": "TYPE"},
-    {"step": 3, "instruction": "在 PowerPoint 启动界面选择'空白演示文稿'", "expected_action": "CLICK"},
-    {"step": 4, "instruction": "在第一页的标题占位符中点击", "expected_action": "CLICK"},
-    {"step": 5, "instruction": "输入文本'工作总结'", "expected_action": "TYPE"}
-]
-
-请仔细分析用户指令，生成合理的步骤序列。'''
 
     def plan(self, user_instruction: str) -> list:
         """
@@ -98,11 +62,14 @@ class TaskPlanner:
                 "enable_thinking": True
             }
 
+            # 从配置文件获取 System Prompt
+            system_prompt = prompt_loader.get_planning_system_prompt()
+
             # 调用 DeepSeek-V3 进行流式响应
             response = self.client.chat.completions.create(
                 model='deepseek-ai/DeepSeek-V3.2',  # 使用 DeepSeek-V3
                 messages=[
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"请将以下指令分解为可执行的步骤：\n\n{user_instruction}"}
                 ],
                 stream=True,  # 启用流式输出
@@ -114,43 +81,13 @@ class TaskPlanner:
             answer_content = ""
             done_thinking = False
 
-            print(f"[TaskPlanner] 🧠 思考过程:")
-            print("-" * 60)
-
-            for chunk in response:
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta
-
-                    # 获取思考内容
-                    thinking_chunk = delta.reasoning_content
-                    # 获取答案内容
-                    answer_chunk = delta.content
-
-                    # 处理思考部分
-                    if thinking_chunk:
-                        thinking_content += thinking_chunk
-                        if self.show_thinking:
-                            print(thinking_chunk, end='', flush=True)
-
-                    # 处理回答部分
-                    elif answer_chunk:
-                        if not done_thinking:
-                            if self.show_thinking:
-                                print('\n\n' + '=' * 60)
-                                print('[TaskPlanner] 💡 最终答案:\n' + '=' * 60)
-                            done_thinking = True
-
-                        answer_content += answer_chunk
-                        if self.show_thinking:
-                            print(answer_chunk, end='', flush=True)
-
-            if self.show_thinking:
-                print("\n")
+            # 处理流式响应
+            thinking_content, answer_content = self._process_stream_response(response)
 
             print(f"[TaskPlanner] ✓ 响应接收完成")
 
             # 解析 JSON 响应
-            time.sleep(0.5)
+            time.sleep(self.API_RESPONSE_DELAY)
             steps = self._parse_response(answer_content)
 
             if steps and len(steps) > 0:
@@ -159,14 +96,17 @@ class TaskPlanner:
                     step_no = step.get('step', '?')
                     instruction = step.get('instruction', '')
                     action = step.get('expected_action', 'N/A')
-                    print(f"  步骤 {step_no}: {instruction[:60]}... ({action})")
+                    print(f"  步骤 {step_no}: {instruction[:self.INSTRUCTION_PREVIEW_LENGTH]}... ({action})")
             else:
                 print(f"[TaskPlanner] ⚠️  分解结果为空")
 
             return steps
 
         except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
             print(f"\n[TaskPlanner] ❌ 规划失败：{str(e)}")
+            print(f"[TaskPlanner] 📋 错误堆栈：\n{error_trace}")
             return []
 
     def _parse_response(self, response_text: str) -> list:
@@ -222,6 +162,54 @@ class TaskPlanner:
         self.show_thinking = old_setting
 
         return result
+
+    def _process_stream_response(self, response) -> tuple:
+        """
+        处理流式响应
+
+        Args:
+            response: OpenAI 流式响应对象
+
+        Returns:
+            (thinking_content, answer_content): 思考内容和答案内容
+        """
+        thinking_content = ""
+        answer_content = ""
+        done_thinking = False
+
+        print(f"[TaskPlanner] 🧠 思考过程:")
+        print("-" * 60)
+
+        for chunk in response:
+            if not chunk.choices or len(chunk.choices) == 0:
+                continue
+
+            delta = chunk.choices[0].delta
+            thinking_chunk = delta.reasoning_content
+            answer_chunk = delta.content
+
+            # 处理思考部分
+            if thinking_chunk:
+                thinking_content += thinking_chunk
+                if self.show_thinking:
+                    print(thinking_chunk, end='', flush=True)
+
+            # 处理回答部分
+            elif answer_chunk:
+                if not done_thinking:
+                    if self.show_thinking:
+                        print('\n\n' + '=' * 60)
+                        print('[TaskPlanner] 💡 最终答案:\n' + '=' * 60)
+                    done_thinking = True
+
+                answer_content += answer_chunk
+                if self.show_thinking:
+                    print(answer_chunk, end='', flush=True)
+
+        if self.show_thinking:
+            print("\n")
+
+        return thinking_content, answer_content
 
 
 if __name__ == "__main__":

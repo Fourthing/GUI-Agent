@@ -1,13 +1,12 @@
-import sys
 import os
-import uuid
+import sys
 import time
-
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from dotenv import load_dotenv
+import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from utils.database import db
+
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 # 添加父目录（Agent）到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,136 +14,30 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.orchestrators.hybrid_decision_orchestrator import HybridDecisionOrchestrator
 from core.orchestrators.planning_orchestrators import TaskPlanner
 from core.orchestrators.reflect_orchestrators import ReflectAgent
-from utils.screen_capture import ScreenCapturer
+from core.safety_manager import SafetyManager
+from utils.database import db
 from utils.image_uploader import upload_to_picgo
+from utils.screen_capture import ScreenCapturer
 
 load_dotenv()
 
 # 创建线程池用于异步上传（最多 3 个并发任务）
 upload_executor = ThreadPoolExecutor(max_workers=3)
 
+safety_manager = SafetyManager()
+
+# 常量定义
+RETRY_DELAY_DECISION_FAILED = 1  # 决策失败后重试延迟（秒）
+RETRY_DELAY_EXECUTION_FAILED = 2  # 执行失败后重试延迟（秒）
+UPLOAD_CHECK_TIMEOUT = 0.1  # 上传状态检查超时（秒）
+LOG_TRUNCATE_LENGTH = 100  # 日志截断长度
+ANALYSIS_TRUNCATE_LENGTH = 200  # 分析文本截断长度
+
 app = Flask(__name__)
 CORS(app)
 
 # 初始化决策编排器
 decision_orchestrator = HybridDecisionOrchestrator()
-
-
-@app.route('/api/execute', methods=['POST'])
-def execute():
-    """
-    废弃！！！！！【核心接口】执行用户指令
-
-    完整流程：规划 → 截图 → 决策 → 返回动作
-    """
-    try:
-        data = request.get_json()
-
-        if not data or 'prompt' not in data:
-            return jsonify({
-                'success': False,
-                'error': '缺少必要参数：prompt'
-            }), 400
-
-        prompt = data['prompt']
-        use_planning = data.get('use_planning', False)
-        show_thinking = data.get('show_thinking', False)
-
-        print(f"\n{'=' * 60}")
-        print(f"[API] 📥 收到执行请求")
-        print(f"指令：{prompt}")
-        print(f"Planning: {'开启' if use_planning else '关闭'}")
-        print(f"{'=' * 60}\n")
-
-        # ========== 步骤 1: Planning（可选）==========
-        steps = []
-        final_prompt = prompt
-
-        if use_planning:
-            print("🧠 [Planning] 开始任务分解...")
-            planner = TaskPlanner(show_thinking=show_thinking)
-            steps = planner.plan_simple(prompt)
-
-            if steps and len(steps) > 0:
-                print(f"✓ 成功分解为 {len(steps)} 个步骤")
-                final_prompt = steps[0].get('instruction', prompt)
-                print(f"→ 当前执行：{final_prompt}")
-            else:
-                print("⚠️  Planning 失败，使用原始指令")
-
-        # ========== 步骤 2: 屏幕截图 ==========
-        print("\n📸 [Capture] 正在截图...")
-        capturer = ScreenCapturer()
-        screenshot_path = capturer.capture()
-        print(f"✓ 截图已保存：{screenshot_path}")
-
-        # ========== 步骤 3: 转换为 base64（关键优化：不再上传到 PicGo）==========
-        print("\n🔄 [Convert] 转换为 base64（无需网络传输）...")
-        start_time = time.time()
-        screenshot_base64 = capturer.capture_to_base64()
-        convert_time = round(time.time() - start_time, 2)
-        print(f"✓ Base64 长度：{len(screenshot_base64)} (耗时：{convert_time}s)")
-
-        # ========== 步骤 4: VLM 决策（使用 base64 data URL，避免网络延迟）==========
-        print("\n🧠 [Decision] 正在分析...")
-
-        # 构造 base64 data URL 格式（ModelScope 支持）
-        image_data_url = f"data:image/png;base64,{screenshot_base64}"
-
-        start_time = time.time()
-        decision_result = decision_orchestrator.decide(
-            image_url=image_data_url,  # 使用 base64 格式，无需下载
-            user_instruction=final_prompt
-        )
-        decision_time = round(time.time() - start_time, 2)
-
-        if not decision_result['success']:
-            return jsonify(decision_result), 500
-
-        # ========== 步骤 5: 构建响应 ==========
-        full_response = decision_result.get('full_response', {})
-        thought = full_response.get('thought', '')
-        action = full_response.get('action')
-        parameters = full_response.get('parameters')
-
-        response_data = {
-            'success': True,
-            'thought': thought,
-            'action': action,
-            'parameters': parameters,
-            'full_response': full_response,
-            'screenshot_path': screenshot_path,
-            'message': f'决策完成：{action}',
-            'timing': {
-                'convert_time': convert_time,
-                'decision_time': decision_time,
-                'total_time': round(convert_time + decision_time, 2)
-            }
-        }
-
-        if use_planning and steps:
-            response_data['steps'] = steps
-            response_data['total_steps'] = len(steps)
-            response_data['current_step'] = 1
-
-        print(f"\n{'=' * 60}")
-        print(f"[API] ✅ 执行完成")
-        print(f"Thought: {thought[:100]}...")
-        print(f"Action: {action}")
-        print(f"总耗时：{round(convert_time + decision_time, 2)}s")
-        print(f"{'=' * 60}\n")
-
-        return jsonify(response_data), 200
-
-    except Exception as e:
-        error_msg = f"执行异常：{str(e)}"
-        print(f"\n[API] ❌ {error_msg}")
-
-        return jsonify({
-            'success': False,
-            'error': error_msg
-        }), 500
-
 
 @app.route('/api/plan', methods=['POST'])
 def plan_task():
@@ -263,6 +156,7 @@ def plan_task():
                 context={'instruction': instruction}
             )
         except Exception:
+            print("\n[Database] ⚠️  记录错误到数据库失败")
             pass  # 忽略数据库错误
 
         return jsonify({
@@ -278,7 +172,7 @@ def decision():
 
     完整流程：
     1. 初始化数据库记录（任务 + 步骤）
-    2. 【新增】如果使用规划模块，先拆分任务
+    2. 指令安全检查
     3. 循环：截图 → 决策 → 执行 → Reflect 验证
     4. 每次尝试都记录到数据库
     5. 根据最终结果更新数据库状态
@@ -308,6 +202,18 @@ def decision():
         print(f"{log_prefix} 使用规划：{'是' if use_planning else '否'}")
         print(f"{'=' * 60}\n")
 
+        if safety_mode:
+            print(f"{log_prefix} 🛡️  [Safety] 正在检查指令安全性...")
+            instruction_check = safety_manager.check_instruction(prompt)
+
+            if instruction_check['blocked']:
+                print(f"{log_prefix} ❌ [Safety] 指令被拦截：{instruction_check['reason']}")
+                return jsonify({
+                    'success': False,
+                    'error': f'安全拦截：{instruction_check["reason"]}',
+                    'safety_blocked': True
+                }), 403
+
         # ========== 步骤 A: 初始化数据库记录 ==========
         task_db_id = None
         step_db_id = None
@@ -332,13 +238,7 @@ def decision():
                 task_db_id = task_record['id']
 
                 # 2. 查找或创建步骤记录
-                from supabase import create_client
-                supabase_client = create_client(
-                    os.getenv('SUPABASE_URL'),
-                    os.getenv('SUPABASE_KEY')
-                )
-
-                result = supabase_client.table('step_executions').select('*') \
+                result = db.client.table('step_executions').select('*') \
                     .eq('task_id', task_db_id) \
                     .eq('step_no', step_no) \
                     .execute()
@@ -382,6 +282,17 @@ def decision():
 
         # ========== 步骤 C: 主循环（决策 → 执行 → 验证 → 重试）==========
         while retry_count <= max_retries:
+
+            if safety_manager.is_stopped():
+                print(f"{log_prefix} ⚠️  [Safety] 检测到停止信号，终止执行")
+                safety_manager.reset_stop()
+
+                return jsonify({
+                    'success': False,
+                    'error': '用户手动终止',
+                    'stopped_by_user': True
+                }), 200
+
             attempt_num = retry_count + 1
             print(f"\n{'=' * 60}")
             print(f"{log_prefix} 🔄 第 {attempt_num} 次尝试 (重试计数：{retry_count}/{max_retries})")
@@ -394,11 +305,9 @@ def decision():
             before_screenshot_base64 = capturer.capture_to_base64()
             print(f"✓ 截图已保存：{screenshot_path}")
 
-            # 2. 转换为 base64
-            print(f"{log_prefix} 🔄 [Convert] 转换为 base64...")
-            convert_start = time.time()
-            convert_time = round(time.time() - convert_start, 2)
-            print(f"✓ Base64 长度：{len(before_screenshot_base64)} (耗时：{convert_time}s)")
+            # 2. 记录 Base64 信息
+            convert_time = 0  # 转换已在 capture_to_base64() 中完成
+            print(f"{log_prefix} ✓ Base64 长度：{len(before_screenshot_base64)}")
 
             # 3. 异步上传
             print(f"{log_prefix} 🚀 [Upload] 启动异步上传...")
@@ -463,7 +372,7 @@ def decision():
 
                 if retry_count <= max_retries:
                     print(f"{log_prefix} ⏳ 等待 1 秒后重试...")
-                    time.sleep(1)
+                    time.sleep(RETRY_DELAY_DECISION_FAILED)
                 continue
 
             final_decision_result = decision_result
@@ -482,6 +391,55 @@ def decision():
                 description = full_response.get('description', '')
 
                 if action and action not in ['FINISH', 'FAILE', 'FAIL']:
+                    if safety_mode:
+                        print(f"{log_prefix} 🛡️  [Safety] 正在检查动作安全性...")
+                        action_check = safety_manager.check_action(action, parameters)
+
+                        if action_check['blocked']:
+                            print(f"{log_prefix} ❌ [Safety] 动作被拦截：{action_check['reason']}")
+
+                            # 记录被拦截的决策
+                            if step_db_id:
+                                try:
+                                    decision_record = db.create_decision(
+                                        step_db_id=step_db_id,
+                                        attempt_no=attempt_num,
+                                        thought=full_response.get('thought', ''),
+                                        action_type=action,
+                                        parameters=parameters,
+                                        full_response=full_response
+                                    )
+                                    db.log_error(
+                                        error_level='WARNING',
+                                        error_type='safety_blocked',
+                                        error_message=action_check['reason'],
+                                        context={'action': action, 'parameters': parameters}
+                                    )
+                                except Exception as db_err:
+                                    print(f"[Database] ⚠️  记录失败：{str(db_err)}")
+
+                            return jsonify({
+                                'success': False,
+                                'error': f'安全拦截：{action_check["reason"]}',
+                                'safety_blocked': True,
+                                'action': action,
+                                'parameters': parameters
+                            }), 403
+
+                        if action_check['requires_confirmation']:
+                            print(f"{log_prefix} ⚠️  [Safety] 需要用户确认：{action_check['reason']}")
+
+                            # 返回给前端，等待用户确认
+                            return jsonify({
+                                'success': True,
+                                'requires_confirmation': True,
+                                'confirmation_reason': action_check['reason'],
+                                'action': action,
+                                'parameters': parameters,
+                                'thought': full_response.get('thought', ''),
+                                'message': '高风险操作，需要用户确认'
+                            }), 200
+
                     action_data = {
                         'action': action,
                         'parameters': parameters,
@@ -527,9 +485,9 @@ def decision():
                         print(f"  错误标志：{reflect_result['error_flag']}")
                         print(f"  置信度：{reflect_result['confidence']:.2f}")
                         print(f"  变化：{reflect_result['changes'][:3] if reflect_result['changes'] else []}")
-                        print(f"  分析：{reflect_result['analysis'][:100]}...")
+                        print(f"  分析：{reflect_result['analysis'][:LOG_TRUNCATE_LENGTH]}...")
                         if reflect_result['suggestion']:
-                            print(f"  建议：{reflect_result['suggestion'][:100]}...")
+                            print(f"  建议：{reflect_result['suggestion'][:LOG_TRUNCATE_LENGTH]}...")
 
                         # 基于 Reflect 结果做决策
                         if reflect_result['status'] == 'A':
@@ -646,7 +604,7 @@ def decision():
 
                         if retry_count <= max_retries:
                             print(f"{log_prefix} ⏳ 等待 2 秒后重试...")
-                            time.sleep(2)
+                            time.sleep(RETRY_DELAY_EXECUTION_FAILED)
 
                     else:
                         print(f"{log_prefix} ❌ 执行失败：{execution_result.get('message')}")
@@ -661,7 +619,7 @@ def decision():
 
                         if retry_count <= max_retries:
                             print(f"{log_prefix} ⏳ 等待 2 秒后重试...")
-                            time.sleep(2)
+                            time.sleep(RETRY_DELAY_EXECUTION_FAILED)
                 else:
                     print(f"{log_prefix} ⚠️  无需执行或特殊动作：{action}")
                     execution_result = {
@@ -684,7 +642,7 @@ def decision():
             upload_status = "pending"
 
             try:
-                screenshot_url = upload_future.result(timeout=0.1)
+                screenshot_url = upload_future.result(timeout=UPLOAD_CHECK_TIMEOUT)
                 if screenshot_url:
                     upload_status = "completed"
                     print(f"{log_prefix} ✓ 上传完成：{screenshot_url}")
@@ -775,14 +733,14 @@ def decision():
             print(f"[API] ✅ 决策 + 执行 + 验证成功（尝试 {retry_count + 1} 次）")
         else:
             print(f"[API] ❌ 决策 + 执行 + 验证失败（已重试 {max_retries} 次）")
-        print(f"Thought: {thought[:100]}...")
+        print(f"Thought: {thought[:LOG_TRUNCATE_LENGTH]}...")
         print(f"Action: {action}")
         if final_execution_result:
             exec_msg = final_execution_result.get('message', '')
-            print(f"执行结果：{exec_msg[:100] if exec_msg else 'N/A'}...")
+            print(f"执行结果：{exec_msg[:LOG_TRUNCATE_LENGTH] if exec_msg else 'N/A'}...")
         if final_reflect_result:
             print(f"Reflect 状态：{final_reflect_result.get('status', '未知')}")
-            print(f"Reflect 分析：{final_reflect_result.get('analysis', '')[:100]}...")
+            print(f"Reflect 分析：{final_reflect_result.get('analysis', '')[:ANALYSIS_TRUNCATE_LENGTH]}...")
         if final_screenshot_url:
             print(f"截图 URL: {final_screenshot_url}")
         print(f"总耗时：{response_data['timing']['total_time']}s")
@@ -824,3 +782,118 @@ def health_check():
         'service': 'GUI-Agent Decision API',
         'timestamp': time.time()
     }), 200
+
+
+@app.route('/api/stop', methods=['POST'])
+def stop_execution():
+    """
+    手动终止执行接口
+
+    Request:
+    {
+        "task_id": "task_xxx"  // 可选
+    }
+
+    Response:
+    {
+        "success": true,
+        "message": "已触发停止信号"
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        task_id = data.get('task_id', None)
+
+        print(f"\n[API] 🛑 收到停止请求")
+        if task_id:
+            print(f"[API] 任务 ID: {task_id}")
+
+        # 触发停止标志
+        safety_manager.trigger_stop()
+
+        return jsonify({
+            'success': True,
+            'message': '已触发停止信号，当前操作完成后将终止',
+            'task_id': task_id
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'停止失败：{str(e)}'
+        }), 500
+
+
+@app.route('/api/safety/config', methods=['GET', 'POST'])
+def safety_config():
+    """
+    安全配置管理接口
+
+    GET: 获取当前配置
+    POST: 更新配置
+
+    Request (POST):
+    {
+        "action": "add_keyword",  // add_keyword | remove_keyword | add_hotkey | remove_hotkey
+        "value": "敏感词或快捷键"
+    }
+
+    Response:
+    {
+        "success": true,
+        "config": {...}  // 当前配置
+    }
+    """
+    try:
+        if request.method == 'GET':
+            # 返回当前配置
+            return jsonify({
+                'success': True,
+                'config': {
+                    'action_blacklist': safety_manager.action_blacklist,
+                    'sensitive_keywords': safety_manager.sensitive_keywords,
+                    'high_risk_patterns': safety_manager.high_risk_patterns
+                }
+            }), 200
+
+        elif request.method == 'POST':
+            data = request.get_json()
+
+            if not data or 'action' not in data or 'value' not in data:
+                return jsonify({
+                    'success': False,
+                    'error': '缺少 action 或 value 参数'
+                }), 400
+
+            action = data['action']
+            value = data['value']
+
+            if action == 'add_keyword':
+                safety_manager.add_sensitive_keyword(value)
+            elif action == 'remove_keyword':
+                safety_manager.remove_sensitive_keyword(value)
+            elif action == 'add_hotkey':
+                safety_manager.add_blocked_hotkey(value)
+            elif action == 'remove_hotkey':
+                safety_manager.remove_blocked_hotkey(value)
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': f'未知的操作：{action}'
+                }), 400
+
+            return jsonify({
+                'success': True,
+                'message': f'操作成功：{action}',
+                'config': {
+                    'action_blacklist': safety_manager.action_blacklist,
+                    'sensitive_keywords': safety_manager.sensitive_keywords,
+                    'high_risk_patterns': safety_manager.high_risk_patterns
+                }
+            }), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'配置管理失败：{str(e)}'
+        }), 500

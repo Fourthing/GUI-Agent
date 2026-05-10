@@ -13,6 +13,20 @@ from typing import Dict, Optional
 class HybridDecisionOrchestrator:
     """混合决策器"""
 
+    # 配置常量
+    MAX_UI_ELEMENTS_DISPLAY = 500  # UI 元素列表最大显示数量
+    MAX_HISTORY_RECORDS = 10  # 历史记录最大保留条数
+    MAX_THOUGHT_LENGTH = 50  # 思考文本最大长度
+    MAX_ANALYSIS_LENGTH = 100  # 分析文本最大长度
+
+    # Reflect 状态描述映射
+    REFLECT_STATUS_DESC = {
+        'A': '✅ 成功',
+        'B': '❌ 进入错误页面',
+        'C': '⚠️ 屏幕无变化',
+        'D': '⚠️ 操作完成但目标未达成'
+    }
+
     def __init__(self):
         self.aci = WindowsACI(top_app_only=True)
         self.vlm_orchestrator = DecisionOrchestrator()
@@ -114,7 +128,7 @@ class HybridDecisionOrchestrator:
         vlm_call_start = time.time()
 
         vlm_result = self._vlm_decision_with_aci(
-            image_url=image_url,  # ← 直接传递 image_url
+            image_url=image_url,
             ui_elements=ui_elements,
             user_instruction=user_instruction,
             step_no=step_no,
@@ -151,7 +165,7 @@ class HybridDecisionOrchestrator:
         }
 
     def _vlm_decision_with_aci(self,
-                               image_url: str,  # ← 改为接收 image_url
+                               image_url: str,
                                ui_elements: list,
                                user_instruction: str,
                                step_no: int,
@@ -182,8 +196,7 @@ class HybridDecisionOrchestrator:
             ui_info += "-" * 80 + "\n"
 
             # 限制显示的元素数量
-            max_elements = 500
-            displayed_elements = ui_elements[:max_elements]
+            displayed_elements = ui_elements[:self.MAX_UI_ELEMENTS_DISPLAY]
 
             for idx, elem in enumerate(displayed_elements):
                 role = elem.get('role', 'Unknown')
@@ -196,8 +209,8 @@ class HybridDecisionOrchestrator:
 
                 ui_info += f"ID={idx:2d} | [{role:15s}] | {description:30s} | 位置={position}\n"
 
-            if len(ui_elements) > max_elements:
-                ui_info += f"... 还有 {len(ui_elements) - max_elements} 个元素未显示\n"
+            if len(ui_elements) > self.MAX_UI_ELEMENTS_DISPLAY:
+                ui_info += f"... 还有 {len(ui_elements) - self.MAX_UI_ELEMENTS_DISPLAY} 个元素未显示\n"
 
             ui_info += "\n【使用说明】\n"
             ui_info += "1. 上述 UI 元素列表提供了界面中所有可交互元素的准确信息\n"
@@ -212,10 +225,10 @@ class HybridDecisionOrchestrator:
             history_text = "\n\n【历史操作记录】\n"
             history_text += "在执行当前操作之前，你已经完成了以下步骤：\n"
 
-            for i, record in enumerate(self.operation_history[-5:], 1):  # 只保留最近 5 条
+            for i, record in enumerate(self.operation_history[-self.MAX_HISTORY_RECORDS:], 1):  # 只保留最近 5 条
                 action = record.get('action', '未知')
                 params = record.get('parameters', {})
-                thought = record.get('thought', '')[:50]  # 截断过长的思考
+                thought = record.get('thought', '')[:self.MAX_THOUGHT_LENGTH]  # 截断过长的思考
 
                 history_text += f"步骤 {i}: {action} (参数: {params})\n"
                 if thought:
@@ -226,16 +239,12 @@ class HybridDecisionOrchestrator:
                 reflect_analysis = record.get('reflect_analysis', '')
 
                 if reflect_status:
-                    status_desc = {
-                        'A': '✅ 成功',
-                        'B': '❌ 进入错误页面',
-                        'C': '⚠️ 屏幕无变化',
-                        'D': '⚠️ 操作完成但目标未达成'
-                    }
-                    history_text += f"  验证结果: {status_desc.get(reflect_status, '未知')}\n"
+                    history_text += f"  验证结果: {self.REFLECT_STATUS_DESC.get(reflect_status, '未知')}\n"
                     if reflect_analysis:
                         # 截断过长的分析
-                        analysis_preview = reflect_analysis[:100] + ('...' if len(reflect_analysis) > 100 else '')
+                        analysis_preview = reflect_analysis[:self.MAX_ANALYSIS_LENGTH] + (
+                            '...' if len(reflect_analysis) > self.MAX_ANALYSIS_LENGTH else ''
+                        )
                         history_text += f"  反思: {analysis_preview}\n"
 
             # ✅ 如果最后一步失败，添加特殊提示（PC-Agent 风格）
@@ -257,7 +266,7 @@ class HybridDecisionOrchestrator:
 
         # 调用原始的 VLM 决策（直接使用 image_url）
         result = self.vlm_orchestrator.decide(
-            image_url=image_url,  # ← 直接传递，无需转换
+            image_url=image_url,
             user_instruction=enhanced_instruction,
             step_no=step_no,
             task_id=task_id

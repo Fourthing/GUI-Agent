@@ -3,10 +3,13 @@ Reflect Agent - 视觉验证模块（重构版）
 基于 PC-Agent 实现，通过双图对比验证 GUI 操作是否成功执行
 支持 A/B/C/D 四种状态判断和 error_flag 机制
 """
-from openai import OpenAI
 import os
+import pyautogui
 import re
+
+from openai import OpenAI
 from dotenv import load_dotenv
+from utils.prompt_loader import prompt_loader
 
 load_dotenv()
 
@@ -14,16 +17,74 @@ load_dotenv()
 class ReflectAgent:
     """
     Reflect Agent - GUI 操作验证代理（PC-Agent 风格）
-
-    通过对比操作前后的屏幕截图和 UI 元素列表，判断操作是否真正达成用户目标。
-    返回细粒度的验证结果（A/B/C/D 四种状态）。
     """
 
-    # 验证状态常量（PC-Agent 标准）
-    STATUS_SUCCESS = "A"        # 操作成功且用户目标完全达成
-    STATUS_ERROR_PAGE = "B"     # 进入错误状态（404、崩溃等）
-    STATUS_NO_CHANGE = "C"      # 屏幕无任何变化
-    STATUS_INCOMPLETE = "D"     # 操作执行但用户目标未达成
+    # API 配置
+    MODELSCOPE_BASE_URL = 'https://api-inference.modelscope.cn/v1'
+    VLM_MODEL_NAME = 'iic/GUI-Owl-7B'
+    API_TIMEOUT = 20
+
+    # 文本处理常量
+    TEXT_PREVIEW_LENGTH = 30
+    LOG_RESPONSE_LENGTH = 300
+
+    # 验证状态常量
+    STATUS_SUCCESS = "A"
+    STATUS_ERROR_PAGE = "B"
+    STATUS_NO_CHANGE = "C"
+    STATUS_INCOMPLETE = "D"
+
+    # 状态映射表
+    STATUS_MAP = {
+        'A': {'status': 'A', 'success': True, 'error_flag': False, 'confidence': 0.9},
+        'B': {'status': 'B', 'success': False, 'error_flag': True, 'confidence': 0.8},
+        'C': {'status': 'C', 'success': False, 'error_flag': True, 'confidence': 0.7},
+        'D': {'status': 'D', 'success': False, 'error_flag': True, 'confidence': 0.6}
+    }
+
+    # 各状态的默认建议
+    DEFAULT_SUGGESTIONS = {
+        'A': '操作已成功，可以继续下一步任务。',
+        'B': '检测到错误状态，建议：\n'
+             '1. 检查是否进入了错误的页面或应用\n'
+             '2. 尝试返回上一页或重新导航\n'
+             '3. 如果持续出错，可能需要调整操作策略',
+        'C': '操作未产生效果，建议：\n'
+             '1. 确认点击的元素是否正确\n'
+             '2. 尝试使用双击代替单击\n'
+             '3. 检查是否有弹窗遮挡\n'
+             '4. 重新尝试该操作',
+        'D': '操作执行但目标未达成，建议：\n'
+             '1. 仔细检查当前屏幕状态\n'
+             '2. 可能需要执行额外的操作步骤\n'
+             '3. 考虑使用不同的方法达成目标\n'
+             '4. 分析是否需要先完成前置条件'
+    }
+
+    # 动作类型描述映射
+    ACTION_DESCRIPTIONS = {
+        'CLICK': '点击某个元素',
+        'DOUBLE_CLICK': '双击打开某个元素',
+        'RIGHT_CLICK': '右键点击某个元素',
+        'TYPE': '输入文本',
+        'SCROLL': '滚动页面',
+        'KEY_PRESS': '按下功能键',
+        'HOTKEY': '按下组合键',
+        'DRAG_TO': '拖拽元素'
+    }
+
+    # 预编译的正则表达式
+    THOUGHT_PATTERN = re.compile(
+        r'###\s*Thought\s*###\s*\n(.*?)(?=###\s*Answer\s*###|$)',
+        re.DOTALL | re.IGNORECASE
+    )
+    ANSWER_PATTERN = re.compile(
+        r'###\s*Answer\s*###\s*\n?\s*([A-D])',
+        re.IGNORECASE
+    )
+    STANDALONE_STATUS_PATTERN = re.compile(
+        r'(?:^|\n)\s*([A-D])\s*(?:$|\n)'
+    )
 
     def __init__(self):
         """初始化 Reflect Agent"""
@@ -32,7 +93,7 @@ class ReflectAgent:
             raise ValueError("未找到 MODELSCOPE_TOKEN 环境变量")
 
         self.client = OpenAI(
-            base_url='https://api-inference.modelscope.cn/v1',
+            base_url=self.MODELSCOPE_BASE_URL,
             api_key=modelscope_token,
         )
 
@@ -47,38 +108,19 @@ class ReflectAgent:
                context: dict = None) -> dict:
         """
         验证 GUI 操作是否成功（PC-Agent 风格）
-
-        Args:
-            before_base64: 操作前的屏幕截图（base64 编码）
-            after_base64: 操作后的屏幕截图（base64 编码）
-            action: 执行的动作类型（CLICK/TYPE/SCROLL 等）
-            parameters: 动作的参数（坐标、文本等）
-            step_instruction: 当前步骤的指令描述
-            before_ui_elements: 操作前的 UI 元素列表（可选）
-            after_ui_elements: 操作后的 UI 元素列表（可选）
-            context: 额外上下文信息（可选）
-
-        Returns:
-            {
-                'status': str,              # A/B/C/D
-                'success': bool,            # 是否成功
-                'error_flag': bool,         # 是否需要纠正/重试
-                'confidence': float,        # 置信度 (0.0-1.0)
-                'changes': list,            # 检测到的变化
-                'analysis': str,            # 详细分析
-                'suggestion': str           # 下一步建议
-            }
         """
         try:
-            # 获取屏幕尺寸（用于 prompt）
-            import pyautogui
+            # 获取屏幕尺寸
             screen_width, screen_height = pyautogui.size()
 
-            # 构建验证 prompt（PC-Agent 格式）
-            prompt = self._build_prompt(
+            # 提取操作意图
+            operation_thought = self._extract_operation_thought(action, parameters)
+
+            # 从配置文件构建验证 prompt
+            prompt = prompt_loader.build_reflect_prompt(
                 instruction=step_instruction,
                 action=action,
-                parameters=parameters,
+                operation_thought=operation_thought,
                 before_ui_elements=before_ui_elements,
                 after_ui_elements=after_ui_elements,
                 width=screen_width,
@@ -110,20 +152,19 @@ class ReflectAgent:
                 }
             ]
 
-            # 调用 VLM 进行验证（使用与决策相同的模型）
+            # 调用 VLM 进行验证
             response = self.client.chat.completions.create(
-                model='iic/GUI-Owl-7B',
+                model=self.VLM_MODEL_NAME,
                 messages=messages,
-                timeout=20
+                timeout=self.API_TIMEOUT
             )
 
-            # 解析响应（纯文本格式）
+            # 解析响应
             result = self._parse_result(response.choices[0].message.content)
 
             return result
 
         except Exception as e:
-            # 异常情况：返回保守的验证结果
             print(f"[ReflectAgent] 验证异常：{str(e)}")
             return {
                 'status': 'C',
@@ -275,18 +316,7 @@ class ReflectAgent:
         Returns:
             操作意图描述字符串
         """
-        action_descriptions = {
-            'CLICK': '点击某个元素',
-            'DOUBLE_CLICK': '双击打开某个元素',
-            'RIGHT_CLICK': '右键点击某个元素',
-            'TYPE': '输入文本',
-            'SCROLL': '滚动页面',
-            'KEY_PRESS': '按下功能键',
-            'HOTKEY': '按下组合键',
-            'DRAG_TO': '拖拽元素'
-        }
-
-        base_thought = action_descriptions.get(action, f'执行{action}操作')
+        base_thought = self.ACTION_DESCRIPTIONS.get(action, f'执行{action}操作')
 
         # 添加具体细节
         if action in ['CLICK', 'DOUBLE_CLICK', 'RIGHT_CLICK']:
@@ -298,7 +328,7 @@ class ReflectAgent:
         elif action == 'TYPE':
             text = parameters.get('text', '')
             if text:
-                preview = text[:30] + ('...' if len(text) > 30 else '')
+                preview = text[:self.TEXT_PREVIEW_LENGTH] + ('...' if len(text) > self.TEXT_PREVIEW_LENGTH else '')
                 base_thought += f'（文本: "{preview}"）'
 
         elif action == 'KEY_PRESS':
@@ -358,14 +388,7 @@ class ReflectAgent:
                 status = answer_match.group(1).upper()
 
             # 3. 状态映射（PC-Agent 标准）
-            status_map = {
-                'A': {'status': 'A', 'success': True, 'error_flag': False, 'confidence': 0.9},
-                'B': {'status': 'B', 'success': False, 'error_flag': True, 'confidence': 0.8},
-                'C': {'status': 'C', 'success': False, 'error_flag': True, 'confidence': 0.7},
-                'D': {'status': 'D', 'success': False, 'error_flag': True, 'confidence': 0.6}
-            }
-
-            mapped = status_map.get(status, status_map['C'])
+            mapped = self.STATUS_MAP.get(status, self.STATUS_MAP[self.STATUS_NO_CHANGE])
 
             # 4. 提取变化描述（从 Thought 中）
             changes = self._extract_changes_from_analysis(analysis, status)
@@ -388,7 +411,7 @@ class ReflectAgent:
 
         except Exception as e:
             print(f"[ReflectAgent] 解析异常：{e}")
-            print(f"原始响应：{response_text[:300]}...")
+            print(f"原始响应：{response_text[:self.LOG_RESPONSE_LENGTH]}...")
 
             # 返回保守结果
             return {
@@ -410,7 +433,7 @@ class ReflectAgent:
         """
         changes = []
 
-        if status == 'A':
+        if status == self.STATUS_SUCCESS:
             # 成功状态，提取积极变化
             if 'appeared' in analysis.lower() or '显示' in analysis or '出现' in analysis:
                 changes.append('目标元素已显示')
@@ -419,10 +442,10 @@ class ReflectAgent:
             if 'entered' in analysis.lower() or '输入' in analysis:
                 changes.append('文本已输入')
 
-        elif status == 'C':
+        elif status == self.STATUS_NO_CHANGE:
             changes.append('屏幕无可见变化')
 
-        elif status == 'D':
+        elif status == self.STATUS_INCOMPLETE:
             # 未完成状态，提取问题
             if 'wrong' in analysis.lower() or '错误' in analysis:
                 changes.append('可能点击了错误的位置')
@@ -431,13 +454,13 @@ class ReflectAgent:
 
         # 如果没有提取到具体变化，使用默认描述
         if not changes:
-            if status == 'A':
+            if status == self.STATUS_SUCCESS:
                 changes.append('操作成功，目标达成')
-            elif status == 'B':
+            elif status == self.STATUS_ERROR_PAGE:
                 changes.append('进入错误状态')
-            elif status == 'C':
+            elif status == self.STATUS_NO_CHANGE:
                 changes.append('无明显变化')
-            elif status == 'D':
+            elif status == self.STATUS_INCOMPLETE:
                 changes.append('操作完成但目标未达成')
 
         return changes
@@ -453,22 +476,7 @@ class ReflectAgent:
         Returns:
             建议字符串
         """
-        suggestions = {
-            'A': '操作已成功，可以继续下一步任务。',
-            'B': '检测到错误状态，建议：\n'
-                 '1. 检查是否进入了错误的页面或应用\n'
-                 '2. 尝试返回上一页或重新导航\n'
-                 '3. 如果持续出错，可能需要调整操作策略',
-            'C': '操作未产生效果，建议：\n'
-                 '1. 确认点击的元素是否正确\n'
-                 '2. 尝试使用双击代替单击\n'
-                 '3. 检查是否有弹窗遮挡\n'
-                 '4. 重新尝试该操作',
-            'D': '操作执行但目标未达成，建议：\n'
-                 '1. 仔细检查当前屏幕状态\n'
-                 '2. 可能需要执行额外的操作步骤\n'
-                 '3. 考虑使用不同的方法达成目标\n'
-                 '4. 分析是否需要先完成前置条件'
-        }
-
-        return suggestions.get(status, '建议重新评估当前状态并调整策略。')
+        return self.DEFAULT_SUGGESTIONS.get(
+            status,
+            '建议重新评估当前状态并调整策略。'
+        )
