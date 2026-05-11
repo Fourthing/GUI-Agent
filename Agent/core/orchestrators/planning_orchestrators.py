@@ -65,7 +65,7 @@ class TaskPlanner:
             # 从配置文件获取 System Prompt
             system_prompt = prompt_loader.get_planning_system_prompt()
 
-            # 调用 DeepSeek-V3 进行流式响应
+            # 调用 DeepSeek-V3.2 进行流式响应
             response = self.client.chat.completions.create(
                 model='deepseek-ai/DeepSeek-V3.2',  # 使用 DeepSeek-V3
                 messages=[

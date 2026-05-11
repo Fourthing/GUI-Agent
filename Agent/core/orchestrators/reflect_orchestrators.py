@@ -28,12 +28,6 @@ class ReflectAgent:
     TEXT_PREVIEW_LENGTH = 30
     LOG_RESPONSE_LENGTH = 300
 
-    # 验证状态常量
-    STATUS_SUCCESS = "A"
-    STATUS_ERROR_PAGE = "B"
-    STATUS_NO_CHANGE = "C"
-    STATUS_INCOMPLETE = "D"
-
     # 状态映射表
     STATUS_MAP = {
         'A': {'status': 'A', 'success': True, 'error_flag': False, 'confidence': 0.9},
@@ -41,6 +35,12 @@ class ReflectAgent:
         'C': {'status': 'C', 'success': False, 'error_flag': True, 'confidence': 0.7},
         'D': {'status': 'D', 'success': False, 'error_flag': True, 'confidence': 0.6}
     }
+
+    # 验证状态常量
+    STATUS_SUCCESS = "A"
+    STATUS_ERROR_PAGE = "B"
+    STATUS_NO_CHANGE = "C"
+    STATUS_INCOMPLETE = "D"
 
     # 各状态的默认建议
     DEFAULT_SUGGESTIONS = {

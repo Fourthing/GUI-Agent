@@ -252,26 +252,20 @@ class WindowsACI:
             else:
                 # 获取整个桌面
                 tree = self.desktop
-
             # 包装为 UIElement
             ui_element = UIElement(tree)
-
             # 排除常见无用角色
             exclude_roles = {"Pane", "Group", "Unknown", "TitleBar"}
             # exclude_roles = set()  # 调试时可打开
-
             # 提取节点
             preserved_nodes = self.preserve_nodes(ui_element, exclude_roles).copy()
-
             # 如果没有提取到元素，尝试不排除任何角色
             if not preserved_nodes and show_all_elements:
                 preserved_nodes = self.preserve_nodes(
                     ui_element, exclude_roles=set()
                 ).copy()
-
             # 保存节点
             self.nodes = preserved_nodes
-
             print(f"[WindowsACI] ✓ 提取到 {len(preserved_nodes)} 个 UI 元素")
 
             return preserved_nodes

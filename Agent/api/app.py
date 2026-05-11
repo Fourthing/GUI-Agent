@@ -24,7 +24,8 @@ load_dotenv()
 # 创建线程池用于异步上传（最多 3 个并发任务）
 upload_executor = ThreadPoolExecutor(max_workers=3)
 
-safety_manager = SafetyManager()
+config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'safety_config.json')
+safety_manager = SafetyManager(config_path=config_path)
 
 # 常量定义
 RETRY_DELAY_DECISION_FAILED = 1  # 决策失败后重试延迟（秒）
