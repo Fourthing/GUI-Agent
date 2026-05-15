@@ -33,6 +33,7 @@ RETRY_DELAY_EXECUTION_FAILED = 2  # 执行失败后重试延迟（秒）
 UPLOAD_CHECK_TIMEOUT = 0.1  # 上传状态检查超时（秒）
 LOG_TRUNCATE_LENGTH = 100  # 日志截断长度
 ANALYSIS_TRUNCATE_LENGTH = 200  # 分析文本截断长度
+DECISION_TIMEOUT = 150  # 决策总超时时间（秒）
 
 app = Flask(__name__)
 CORS(app)
@@ -177,6 +178,10 @@ def decision():
     3. 循环：截图 → 决策 → 执行 → Reflect 验证
     4. 每次尝试都记录到数据库
     5. 根据最终结果更新数据库状态
+
+    支持用户确认机制：
+    - 第一次请求：检测到高风险操作，返回 requires_confirmation
+    - 第二次请求：携带 confirmed=true 和缓存的动作，跳过 VLM 决策直接执行
     """
     try:
         data = request.get_json()
@@ -192,8 +197,13 @@ def decision():
         step_no = data.get('step_no', 1)
         auto_execute = data.get('auto_execute', True)
         safety_mode = data.get('safety_mode', False)
-        max_retries = data.get('max_retries', 1)
+        max_retries = data.get('max_retries', 3)
         use_planning = data.get('use_planning', True)
+
+        # ========== 新增：用户确认标识和缓存的动作 ==========
+        user_confirmed = data.get('confirmed', False)
+        cached_action = data.get('cached_action')
+        cached_parameters = data.get('cached_parameters')
 
         log_prefix = f"[Task:{task_id}] Step:{step_no}" if task_id else f"Step:{step_no}"
 
@@ -201,6 +211,10 @@ def decision():
         print(f"[API] 📥 收到决策请求")
         print(f"{log_prefix} 指令：{prompt}")
         print(f"{log_prefix} 使用规划：{'是' if use_planning else '否'}")
+        if user_confirmed:
+            print(f"{log_prefix} ✅ 用户已确认高风险操作")
+            if cached_action:
+                print(f"{log_prefix} 📦 使用缓存的动作：{cached_action}")
         print(f"{'=' * 60}\n")
 
         if safety_mode:
@@ -222,37 +236,40 @@ def decision():
 
         try:
             if task_id:
-                # 1. 查找或创建任务记录
                 task_record = db.get_task_by_id(task_id)
 
                 if not task_record:
-                    # 任务不存在，创建新任务
                     task_record = db.create_task(
                         task_id=task_id,
                         instruction=prompt,
                         total_steps=1
                     )
                     print(f"[Database] ✓ 创建新任务记录：{task_record['id']}")
+
+                    start_timestamp = time.time()
+                    try:
+                        db.record_task_start_time(
+                            task_db_id=task_record['id'],
+                            start_timestamp=start_timestamp
+                        )
+                        print(f"[Database] ⏱️  记录任务开始时间：{start_timestamp}")
+                    except Exception as time_error:
+                        print(f"[Database] ⚠️  记录开始时间失败：{str(time_error)}")
                 else:
                     print(f"[Database] ℹ️  使用已有任务记录：{task_record['id']}")
 
                 task_db_id = task_record['id']
 
-                # 2. 查找或创建步骤记录
                 result = db.client.table('step_executions').select('*') \
                     .eq('task_id', task_db_id) \
                     .eq('step_no', step_no) \
                     .execute()
 
                 if result.data and len(result.data) > 0:
-                    # 步骤已存在
                     step_db_id = result.data[0]['id']
                     print(f"[Database] ℹ️  使用已有步骤记录：{step_db_id}")
-
-                    # 更新步骤状态为 running
                     db.update_step_status(step_db_id=step_db_id, status='running')
                 else:
-                    # 创建新步骤
                     step_record = db.create_step(
                         task_db_id=task_db_id,
                         step_no=step_no,
@@ -264,7 +281,6 @@ def decision():
 
         except Exception as db_error:
             print(f"[Database] ⚠️  数据库初始化失败：{str(db_error)}")
-            # 数据库失败不影响主流程
 
         # ========== 步骤 B: 初始化执行状态 ==========
         retry_count = 0
@@ -299,29 +315,51 @@ def decision():
             print(f"{log_prefix} 🔄 第 {attempt_num} 次尝试 (重试计数：{retry_count}/{max_retries})")
             print(f"{'=' * 60}\n")
 
-            # 1. 屏幕截图（执行前）
-            print(f"{log_prefix} 📸 [Capture] 正在截图（执行前）...")
-            capturer = ScreenCapturer()
-            screenshot_path = capturer.capture()
-            before_screenshot_base64 = capturer.capture_to_base64()
-            print(f"✓ 截图已保存：{screenshot_path}")
+            # ========== 关键修改：判断是否使用缓存的动作 ==========
+            if user_confirmed and cached_action and cached_parameters is not None:
+                print(f"{log_prefix} 📦 使用缓存的动作，跳过 VLM 决策")
 
-            # 2. 记录 Base64 信息
-            convert_time = 0  # 转换已在 capture_to_base64() 中完成
-            print(f"{log_prefix} ✓ Base64 长度：{len(before_screenshot_base64)}")
+                action = cached_action.upper()
+                parameters = cached_parameters
+                description = f"用户确认的高风险操作：{action}"
 
-            # 3. 异步上传
-            print(f"{log_prefix} 🚀 [Upload] 启动异步上传...")
-            upload_future = upload_executor.submit(upload_to_picgo, screenshot_path)
+                final_decision_result = {
+                    'success': True,
+                    'thought': f"用户已确认执行 {action} 操作",
+                    'action': action,
+                    'parameters': parameters,
+                    'full_response': {
+                        'action': action,
+                        'parameters': parameters,
+                        'thought': f"用户已确认执行 {action} 操作"
+                    }
+                }
+                decision_time = 0
 
-            # 4. VLM 决策
-            print(f"{log_prefix} 🧠 [Decision] 正在分析...")
+                print(f"{log_prefix} 📍 准备执行缓存的动作：{action}")
+                print(f"{log_prefix} 参数：{parameters}")
 
-            image_data_url = f"data:image/png;base64,{before_screenshot_base64}"
+                full_response = final_decision_result['full_response']
 
-            # 如果是重试且有过 Reflect 反馈
-            if retry_count > 0 and final_reflect_result:
-                retry_prompt = f"""{prompt}
+            else:
+                print(f"{log_prefix} 📸 [Capture] 正在截图（执行前）...")
+                capturer = ScreenCapturer()
+                screenshot_path = capturer.capture()
+                before_screenshot_base64 = capturer.capture_to_base64()
+                print(f"✓ 截图已保存：{screenshot_path}")
+
+                convert_time = 0
+                print(f"{log_prefix} ✓ Base64 长度：{len(before_screenshot_base64)}")
+
+                print(f"{log_prefix} 🚀 [Upload] 启动异步上传...")
+                upload_future = upload_executor.submit(upload_to_picgo, screenshot_path)
+
+                print(f"{log_prefix} 🧠 [Decision] 正在分析...")
+
+                image_data_url = f"data:image/png;base64,{before_screenshot_base64}"
+
+                if retry_count > 0 and final_reflect_result:
+                    retry_prompt = f"""{prompt}
 
 【重要反馈】上一步操作未能完全达成目标。
 验证状态：{final_reflect_result.get('status', '未知')}
@@ -331,58 +369,51 @@ def decision():
 
 请根据上述反馈重新分析屏幕并生成纠正操作。"""
 
-                user_instruction_for_vlm = retry_prompt
-            else:
-                user_instruction_for_vlm = prompt
+                    user_instruction_for_vlm = retry_prompt
+                else:
+                    user_instruction_for_vlm = prompt
 
-            decision_start = time.time()
-            decision_result = decision_orchestrator.decide(
-                image_url=image_data_url,
-                user_instruction=user_instruction_for_vlm,
-                step_no=step_no,
-                task_id=task_id
-            )
-            decision_time = round(time.time() - decision_start, 2)
+                decision_start = time.time()
+                decision_result = decision_orchestrator.decide(
+                    image_url=image_data_url,
+                    user_instruction=user_instruction_for_vlm,
+                    step_no=step_no,
+                    task_id=task_id
+                )
+                decision_time = round(time.time() - decision_start, 2)
 
-            if not decision_result['success']:
-                print(f"{log_prefix} ❌ VLM 决策失败")
-                retry_count += 1
-                last_error_reason = decision_result.get('error', '未知错误')
+                if not decision_result['success']:
+                    print(f"{log_prefix} ❌ VLM 决策失败")
+                    retry_count += 1
+                    last_error_reason = decision_result.get('error', '未知错误')
 
-                retry_history.append({
-                    'attempt': attempt_num,
-                    'stage': 'decision',
-                    'error': last_error_reason
-                })
+                    retry_history.append({
+                        'attempt': attempt_num,
+                        'stage': 'decision',
+                        'error': last_error_reason
+                    })
 
-                # 记录失败的决策到数据库
-                if step_db_id:
-                    try:
-                        decision_record = db.create_decision(
-                            step_db_id=step_db_id,
-                            attempt_no=attempt_num,
-                            thought=None,
-                            action_type=None,
-                            parameters=None,
-                            full_response=None
-                        )
-                        decision_db_id = decision_record['id']
-                        print(f"[Database] ✓ 创建决策记录（失败）")
-                    except Exception as db_err:
-                        print(f"[Database] ⚠️  记录决策失败：{str(db_err)}")
+                    if step_db_id:
+                        try:
+                            decision_record = db.create_decision(
+                                step_db_id=step_db_id,
+                                attempt_no=attempt_num,
+                                thought=None,
+                                action_type=None,
+                                parameters=None,
+                                full_response=None
+                            )
+                            decision_db_id = decision_record['id']
+                            print(f"[Database] ✓ 创建决策记录（失败）")
+                        except Exception as db_err:
+                            print(f"[Database] ⚠️  记录决策失败：{str(db_err)}")
 
-                if retry_count <= max_retries:
-                    print(f"{log_prefix} ⏳ 等待 1 秒后重试...")
-                    time.sleep(RETRY_DELAY_DECISION_FAILED)
-                continue
+                    if retry_count <= max_retries:
+                        print(f"{log_prefix} ⏳ 等待 1 秒后重试...")
+                        time.sleep(RETRY_DELAY_DECISION_FAILED)
+                    continue
 
-            final_decision_result = decision_result
-
-            # 5. 自动执行
-            execution_result = None
-
-            if auto_execute:
-                print(f"\n{log_prefix} ⚙️  [Execute] 准备自动执行...")
+                final_decision_result = decision_result
 
                 full_response = decision_result.get('full_response', {})
                 action = (full_response.get('action') or
@@ -391,15 +422,20 @@ def decision():
                 parameters = full_response.get('parameters') or full_response.get('Parameters') or {}
                 description = full_response.get('description', '')
 
+            # 5. 自动执行
+            execution_result = None
+
+            if auto_execute:
+                print(f"\n{log_prefix} ⚙️  [Execute] 准备自动执行...")
+
                 if action and action not in ['FINISH', 'FAILE', 'FAIL']:
-                    if safety_mode:
+                    if safety_mode and not user_confirmed:
                         print(f"{log_prefix} 🛡️  [Safety] 正在检查动作安全性...")
                         action_check = safety_manager.check_action(action, parameters)
 
                         if action_check['blocked']:
                             print(f"{log_prefix} ❌ [Safety] 动作被拦截：{action_check['reason']}")
 
-                            # 记录被拦截的决策
                             if step_db_id:
                                 try:
                                     decision_record = db.create_decision(
@@ -430,7 +466,6 @@ def decision():
                         if action_check['requires_confirmation']:
                             print(f"{log_prefix} ⚠️  [Safety] 需要用户确认：{action_check['reason']}")
 
-                            # 返回给前端，等待用户确认
                             return jsonify({
                                 'success': True,
                                 'requires_confirmation': True,
@@ -440,6 +475,9 @@ def decision():
                                 'thought': full_response.get('thought', ''),
                                 'message': '高风险操作，需要用户确认'
                             }), 200
+
+                    elif safety_mode and user_confirmed:
+                        print(f"{log_prefix} ✅ [Safety] 用户已确认，跳过安全检查")
 
                     action_data = {
                         'action': action,
@@ -451,18 +489,21 @@ def decision():
                     print(f"{log_prefix} 参数：{parameters}")
 
                     from core.action_module import ActionModule
-                    # executor = ActionModule(safety_mode=safety_mode)
                     executor = ActionModule()
                     execution_result = executor.execute(action_data)
 
                     if execution_result.get('success'):
                         print(f"{log_prefix} ✅ 执行成功：{execution_result.get('message')}")
 
-                        # 6. 再次截图（执行后）
-                        print(f"{log_prefix} 📸 [Capture] 正在截图（执行后）...")
-                        after_screenshot_base64 = capturer.capture_to_base64()
+                        if not (user_confirmed and cached_action):
+                            print(f"{log_prefix} 📸 [Capture] 正在截图（执行后）...")
+                            after_screenshot_base64 = capturer.capture_to_base64()
+                        else:
+                            print(f"{log_prefix} 📸 [Capture] 正在截图（执行后）...")
+                            after_capturer = ScreenCapturer()
+                            after_screenshot_base64 = after_capturer.capture_to_base64()
+                            before_screenshot_base64 = after_screenshot_base64
 
-                        # 7. Reflect 验证
                         print(f"{log_prefix} 🔍 [Reflect] 正在验证操作结果...")
                         reflect_agent = ReflectAgent()
 
@@ -484,21 +525,17 @@ def decision():
                         print(f"  状态：{reflect_result['status']}")
                         print(f"  成功：{reflect_result['success']}")
                         print(f"  错误标志：{reflect_result['error_flag']}")
-                        print(f"  置信度：{reflect_result['confidence']:.2f}")
                         print(f"  变化：{reflect_result['changes'][:3] if reflect_result['changes'] else []}")
                         print(f"  分析：{reflect_result['analysis'][:LOG_TRUNCATE_LENGTH]}...")
                         if reflect_result['suggestion']:
                             print(f"  建议：{reflect_result['suggestion'][:LOG_TRUNCATE_LENGTH]}...")
 
-                        # 基于 Reflect 结果做决策
                         if reflect_result['status'] == 'A':
                             print(f"\n{log_prefix} ✅ Reflect 验证通过，操作成功")
                             final_execution_result = execution_result
 
-                            # ========== 记录成功的决策和验证到数据库 ==========
                             if step_db_id:
                                 try:
-                                    # 创建决策记录
                                     decision_record = db.create_decision(
                                         step_db_id=step_db_id,
                                         attempt_no=attempt_num,
@@ -509,7 +546,6 @@ def decision():
                                     )
                                     decision_db_id = decision_record['id']
 
-                                    # 更新决策执行结果
                                     db.update_decision_result(
                                         decision_db_id=decision_db_id,
                                         execution_success=True,
@@ -518,13 +554,11 @@ def decision():
                                         screenshot_url=final_screenshot_url
                                     )
 
-                                    # 创建 Reflect 验证记录
                                     db.create_verification(
                                         decision_db_id=decision_db_id,
                                         status=reflect_result['status'],
                                         success=reflect_result['success'],
                                         error_flag=reflect_result['error_flag'],
-                                        confidence=reflect_result['confidence'],
                                         changes_detected=reflect_result['changes'],
                                         analysis=reflect_result['analysis'],
                                         suggestion=reflect_result['suggestion'],
@@ -534,7 +568,6 @@ def decision():
 
                                     print(f"[Database] ✓ 记录决策和验证结果")
 
-                                    # 更新步骤状态为成功
                                     db.update_step_status(
                                         step_db_id=step_db_id,
                                         status='success',
@@ -544,7 +577,7 @@ def decision():
                                 except Exception as db_err:
                                     print(f"[Database] ⚠️  记录结果失败：{str(db_err)}")
 
-                            break  # 成功，退出循环
+                            break
 
                         elif reflect_result['status'] == 'B':
                             print(f"\n{log_prefix} ❌ 进入错误状态：{reflect_result['analysis']}")
@@ -561,7 +594,6 @@ def decision():
                             retry_count += 1
                             last_error_reason = f"未完成：{reflect_result['suggestion']}"
 
-                            # 记录部分成功的结果
                             if step_db_id and decision_db_id is None:
                                 try:
                                     decision_record = db.create_decision(
@@ -579,7 +611,6 @@ def decision():
                                         status=reflect_result['status'],
                                         success=reflect_result['success'],
                                         error_flag=reflect_result['error_flag'],
-                                        confidence=reflect_result['confidence'],
                                         changes_detected=reflect_result['changes'],
                                         analysis=reflect_result['analysis'],
                                         suggestion=reflect_result['suggestion']
@@ -594,7 +625,7 @@ def decision():
                                 except Exception as db_err:
                                     print(f"[Database] ⚠️  记录部分成功结果失败：{str(db_err)}")
 
-                            break  # 部分成功，退出循环
+                            break
 
                         retry_history.append({
                             'attempt': attempt_num,
@@ -629,16 +660,23 @@ def decision():
                         'action': action
                     }
                     final_execution_result = execution_result
-                    after_screenshot_base64 = capturer.capture_to_base64()
+                    if not (user_confirmed and cached_action):
+                        after_screenshot_base64 = capturer.capture_to_base64()
+                    else:
+                        after_capturer = ScreenCapturer()
+                        after_screenshot_base64 = after_capturer.capture_to_base64()
                     break
             else:
                 print(f"{log_prefix} ℹ️  跳过自动执行（auto_execute=false）")
                 execution_result = {'success': True, 'message': '未执行'}
                 final_execution_result = execution_result
-                after_screenshot_base64 = capturer.capture_to_base64()
+                if not (user_confirmed and cached_action):
+                    after_screenshot_base64 = capturer.capture_to_base64()
+                else:
+                    after_capturer = ScreenCapturer()
+                    after_screenshot_base64 = after_capturer.capture_to_base64()
                 break
 
-            # 检查上传状态
             screenshot_url = None
             upload_status = "pending"
 
@@ -663,20 +701,26 @@ def decision():
             final_decision_time = decision_time
 
         # ========== 步骤 D: 处理最终状态 ==========
+        print(f"\n{log_prefix} 📊 退出主循环，开始处理最终状态...")
+        print(f"{log_prefix} 📊 retry_count={retry_count}, max_retries={max_retries}")
+
         final_success = (retry_count <= max_retries) and \
                         (final_execution_result.get('success') if final_execution_result else False) and \
                         (final_reflect_result.get('success', False) if final_reflect_result else True)
 
-        # 更新数据库中的步骤状态
+        print(f"{log_prefix} 📊 final_success={final_success}")
+
         if step_db_id:
             try:
                 if final_success:
+                    print(f"{log_prefix} 💾 更新步骤状态为 success")
                     db.update_step_status(
                         step_db_id=step_db_id,
                         status='success',
                         retry_count=retry_count
                     )
                 else:
+                    print(f"{log_prefix} 💾 更新步骤状态为 failed")
                     db.update_step_status(
                         step_db_id=step_db_id,
                         status='failed',
@@ -685,7 +729,23 @@ def decision():
             except Exception as db_err:
                 print(f"[Database] ⚠️  更新步骤状态失败：{str(db_err)}")
 
+        if task_db_id:
+            try:
+                end_timestamp = time.time()
+                duration_seconds = round(end_timestamp - start_time, 2)
+
+                db.record_task_end_time(
+                    task_db_id=task_db_id,
+                    end_timestamp=end_timestamp,
+                    duration_seconds=duration_seconds
+                )
+                print(f"[Database] ⏱️  记录任务结束时间：{end_timestamp}，总耗时：{duration_seconds}s")
+            except Exception as time_error:
+                print(f"[Database] ⚠️  记录结束时间失败：{str(time_error)}")
+
         # ========== 步骤 E: 构建最终响应 ==========
+        print(f"{log_prefix} 📤 准备返回响应...")
+
         full_response = final_decision_result.get('full_response', {}) if final_decision_result else {}
         thought = full_response.get('thought', '') if full_response else ''
         action = (full_response.get('action') or
@@ -721,7 +781,6 @@ def decision():
             }
         }
 
-        # 添加数据库 ID 信息
         if task_db_id:
             response_data['task_db_id'] = task_db_id
         if step_db_id:
@@ -747,23 +806,24 @@ def decision():
         print(f"总耗时：{response_data['timing']['total_time']}s")
         print(f"{'=' * 60}\n")
 
+        print(f"{log_prefix} 📤 返回 HTTP 响应...")
         return jsonify(response_data), 200
 
     except Exception as e:
         error_msg = f"决策异常：{str(e)}"
         print(f"\n[API] ❌ {error_msg}")
 
-        # 记录错误到数据库
         try:
+            data = request.get_json() if request.is_json else {}
             db.log_error(
                 error_level='ERROR',
                 error_type='decision_exception',
                 error_message=str(e),
                 stack_trace=None,
                 context={
-                    'task_id': task_id,
-                    'step_no': step_no,
-                    'prompt': prompt
+                    'task_id': data.get('task_id'),
+                    'step_no': data.get('step_no', 1),
+                    'prompt': data.get('prompt')
                 }
             )
         except Exception:

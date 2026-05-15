@@ -78,6 +78,11 @@ class DecisionOrchestrator:
             }
         ]
 
+        # print(f"{log_prefix} 📋 User Instruction 长度：{len(user_instruction)} 字符")
+        # print(f"{log_prefix} 📄 User Instruction:\n{'-' * 60}")
+        # print(user_instruction)
+        # print(f"{'-' * 60}\n")
+
         try:
             print(f"{log_prefix} ⏱️  [VLM] 开始调用 ModelScope API...")
             api_start_time = time.time()

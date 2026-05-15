@@ -21,6 +21,8 @@ class TaskPlanner:
     API_RESPONSE_DELAY = 0.5  # API 响应后的延迟时间（秒）
     INSTRUCTION_PREVIEW_LENGTH = 60  # 步骤描述预览长度
     MAX_STEPS_DISPLAY = 15  # 最大步骤数参考值
+    THINKING_BUFFER_SIZE = 100  # 思考内容每 100 字符打印一次
+    ANSWER_BUFFER_SIZE = 100  # 答案内容每 100 字符打印一次
 
     def __init__(self, show_thinking: bool = True):
         """
@@ -177,8 +179,9 @@ class TaskPlanner:
         answer_content = ""
         done_thinking = False
 
-        print(f"[TaskPlanner] 🧠 思考过程:")
-        print("-" * 60)
+        # 批量输出优化：累积一定字符后再打印
+        thinking_buffer = ""
+        answer_buffer = ""
 
         for chunk in response:
             if not chunk.choices or len(chunk.choices) == 0:
@@ -192,34 +195,48 @@ class TaskPlanner:
             if thinking_chunk:
                 thinking_content += thinking_chunk
                 if self.show_thinking:
-                    print(thinking_chunk, end='', flush=True)
+                    thinking_buffer += thinking_chunk
+                    # 缓冲区达到阈值时打印
+                    if len(thinking_buffer) >= self.THINKING_BUFFER_SIZE:
+                        print(thinking_buffer, end='', flush=True)
+                        thinking_buffer = ""
 
             # 处理回答部分
             elif answer_chunk:
                 if not done_thinking:
                     if self.show_thinking:
+                        # 打印剩余的思考缓冲
+                        if thinking_buffer:
+                            print(thinking_buffer, end='', flush=True)
+                            thinking_buffer = ""
                         print('\n\n' + '=' * 60)
                         print('[TaskPlanner] 💡 最终答案:\n' + '=' * 60)
                     done_thinking = True
 
                 answer_content += answer_chunk
                 if self.show_thinking:
-                    print(answer_chunk, end='', flush=True)
+                    answer_buffer += answer_chunk
+                    # 缓冲区达到阈值时打印
+                    if len(answer_buffer) >= self.ANSWER_BUFFER_SIZE:
+                        print(answer_buffer, end='', flush=True)
+                        answer_buffer = ""
 
+        # 打印剩余的缓冲区
         if self.show_thinking:
+            if thinking_buffer:
+                print(thinking_buffer, end='', flush=True)
+            if answer_buffer:
+                print(answer_buffer, end='', flush=True)
             print("\n")
 
         return thinking_content, answer_content
-
 
 if __name__ == "__main__":
     # 测试
     planner = TaskPlanner(show_thinking=True)
 
     test_instructions = [
-        "打开浏览器，搜索人工智能，下载第一张图片",
-        "帮我创建一个 PPT，第一页标题是'工作总结'",
-        "打开记事本，输入'Hello World'，保存到桌面"
+        "打开 Edge 浏览器，依次打开百度、必应和谷歌三个标签页"
     ]
 
     for instruction in test_instructions:

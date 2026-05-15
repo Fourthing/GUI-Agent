@@ -1,14 +1,16 @@
 """
-Reflect Agent - 视觉验证模块（重构版）
-基于 PC-Agent 实现，通过双图对比验证 GUI 操作是否成功执行
+Reflect Agent - 视觉验证模块
+通过双图对比验证 GUI 操作是否成功执行
 支持 A/B/C/D 四种状态判断和 error_flag 机制
 """
 import os
-import pyautogui
 import re
+import time
+import traceback
 
-from openai import OpenAI
+import pyautogui
 from dotenv import load_dotenv
+from openai import OpenAI
 from utils.prompt_loader import prompt_loader
 
 load_dotenv()
@@ -17,9 +19,14 @@ load_dotenv()
 class ReflectAgent:
     """
     Reflect Agent - GUI 操作验证代理（PC-Agent 风格）
+
+    职责：
+    - 通过对比操作前后的屏幕截图和UI元素变化
+    - 验证 GUI 操作是否成功达成用户指令的目标
+    - 返回 A/B/C/D 四种状态及详细分析
     """
 
-    # API 配置
+    # API 配置常量
     MODELSCOPE_BASE_URL = 'https://api-inference.modelscope.cn/v1'
     VLM_MODEL_NAME = 'iic/GUI-Owl-7B'
     API_TIMEOUT = 20
@@ -28,12 +35,12 @@ class ReflectAgent:
     TEXT_PREVIEW_LENGTH = 30
     LOG_RESPONSE_LENGTH = 300
 
-    # 状态映射表
+    # 状态映射表：将 A/B/C/D 映射到内部状态
     STATUS_MAP = {
-        'A': {'status': 'A', 'success': True, 'error_flag': False, 'confidence': 0.9},
-        'B': {'status': 'B', 'success': False, 'error_flag': True, 'confidence': 0.8},
-        'C': {'status': 'C', 'success': False, 'error_flag': True, 'confidence': 0.7},
-        'D': {'status': 'D', 'success': False, 'error_flag': True, 'confidence': 0.6}
+        'A': {'status': 'A', 'success': True, 'error_flag': False},
+        'B': {'status': 'B', 'success': False, 'error_flag': True},
+        'C': {'status': 'C', 'success': False, 'error_flag': True},
+        'D': {'status': 'D', 'success': False, 'error_flag': True}
     }
 
     # 验证状态常量
@@ -73,7 +80,7 @@ class ReflectAgent:
         'DRAG_TO': '拖拽元素'
     }
 
-    # 预编译的正则表达式
+    # 预编译的正则表达式（提升性能）
     THOUGHT_PATTERN = re.compile(
         r'###\s*Thought\s*###\s*\n(.*?)(?=###\s*Answer\s*###|$)',
         re.DOTALL | re.IGNORECASE
@@ -81,6 +88,10 @@ class ReflectAgent:
     ANSWER_PATTERN = re.compile(
         r'###\s*Answer\s*###\s*\n?\s*([A-D])',
         re.IGNORECASE
+    )
+    SUGGESTION_PATTERN = re.compile(
+        r'###\s*Suggestion\s*###\s*\n(.*?)(?=###\s*Answer\s*###|$)',
+        re.DOTALL | re.IGNORECASE
     )
     STANDALONE_STATUS_PATTERN = re.compile(
         r'(?:^|\n)\s*([A-D])\s*(?:$|\n)'
@@ -108,7 +119,33 @@ class ReflectAgent:
                context: dict = None) -> dict:
         """
         验证 GUI 操作是否成功（PC-Agent 风格）
+
+        Args:
+            before_base64: 操作前截图的 base64 编码
+            after_base64: 操作后截图的 base64 编码
+            action: 动作类型（CLICK/TYPE/SCROLL等）
+            parameters: 动作参数字典
+            step_instruction: 当前步骤的具体指令
+            before_ui_elements: 操作前的 UI 元素列表
+            after_ui_elements: 操作后的 UI 元素列表
+            context: 额外的上下文信息（可选）
+
+        Returns:
+            dict: {
+                'status': str,          # A/B/C/D 状态标识
+                'success': bool,        # 是否成功
+                'error_flag': bool,     # 是否有错误
+                'changes': list[str],   # 检测到的变化列表
+                'analysis': str,        # VLM 的分析文本
+                'suggestion': str       # 下一步建议
+            }
         """
+        start_time = time.time()
+        print(f"\n{'=' * 60}")
+        print(f"[ReflectAgent] 🔍 开始验证操作")
+        print(f"动作：{action} | 指令：{step_instruction[:50]}...")
+        print(f"{'=' * 60}\n")
+
         try:
             # 获取屏幕尺寸
             screen_width, screen_height = pyautogui.size()
@@ -116,8 +153,11 @@ class ReflectAgent:
             # 提取操作意图
             operation_thought = self._extract_operation_thought(action, parameters)
 
-            # 从配置文件构建验证 prompt
-            prompt = prompt_loader.build_reflect_prompt(
+            # 构建 System Prompt（固定部分：角色定义、验证标准、输出格式）
+            system_prompt = prompt_loader.get_reflect_system_prompt()
+
+            # 构建 User Prompt（动态部分：屏幕信息、UI元素、操作详情）
+            user_prompt = prompt_loader.build_reflect_user_prompt(
                 instruction=step_instruction,
                 action=action,
                 operation_thought=operation_thought,
@@ -127,8 +167,12 @@ class ReflectAgent:
                 height=screen_height
             )
 
-            # 构造 VLM 请求（双图对比）
+            # 构造 VLM 请求（System + User + 双图对比）
             messages = [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
                 {
                     "role": "user",
                     "content": [
@@ -146,164 +190,57 @@ class ReflectAgent:
                         },
                         {
                             "type": "text",
-                            "text": prompt
+                            "text": user_prompt
                         }
                     ]
                 }
             ]
 
+            # print(f"[ReflectAgent] 📋 User Prompt 长度：{len(user_prompt)} 字符")
+            # print(f"\n[ReflectAgent] 📄 User Prompt :\n{user_prompt}")
+            # print(f"{'-' * 60}\n")
+
             # 调用 VLM 进行验证
+            print(f"[ReflectAgent] ⏱️  [VLM] 开始分析双图差异...")
+            api_start_time = time.time()
+
             response = self.client.chat.completions.create(
                 model=self.VLM_MODEL_NAME,
                 messages=messages,
                 timeout=self.API_TIMEOUT
             )
 
+            api_elapsed = time.time() - api_start_time
+            print(f"[ReflectAgent] ⏱️  [VLM] API 响应耗时：{api_elapsed:.2f}s")
+
             # 解析响应
+            parse_start_time = time.time()
             result = self._parse_result(response.choices[0].message.content)
+            parse_elapsed = time.time() - parse_start_time
+
+            print(f"[ReflectAgent] ✅ 验证结果：状态={result['status']} | "
+                  f"成功={result['success']}")
+            print(f"[ReflectAgent] ⏱️  [JSON] 解析耗时：{parse_elapsed:.3f}s")
+
+            total_elapsed = time.time() - start_time
+            print(f"[ReflectAgent] ⏱️  [总计] verify() 总耗时：{total_elapsed:.2f}s\n")
 
             return result
 
         except Exception as e:
-            print(f"[ReflectAgent] 验证异常：{str(e)}")
+            total_elapsed = time.time() - start_time
+            error_trace = traceback.format_exc()
+            print(f"[ReflectAgent] ❌ 验证失败（耗时 {total_elapsed:.2f}s）：{e}")
+            print(f"[ReflectAgent] 📋 trace：\n{error_trace}")
+
             return {
                 'status': 'C',
                 'success': False,
                 'error_flag': True,
-                'confidence': 0.3,
-                'changes': [],
+                'changes': ['验证过程发生异常'],
                 'analysis': f'验证过程发生异常：{str(e)}',
-                'suggestion': '建议重新尝试该操作'
+                'suggestion': '建议重新尝试该操作或检查VLM服务状态'
             }
-
-    def _build_prompt(self,
-                      instruction: str,
-                      action: str,
-                      parameters: dict,
-                      before_ui_elements: list = None,
-                      after_ui_elements: list = None,
-                      width: int = None,
-                      height: int = None) -> str:
-        """
-        构建验证 prompt（PC-Agent 格式）
-
-        Args:
-            instruction: 用户指令
-            action: 动作类型
-            parameters: 动作参数
-            before_ui_elements: 操作前的 UI 元素列表
-            after_ui_elements: 操作后的 UI 元素列表
-            width: 屏幕宽度
-            height: 屏幕高度
-
-        Returns:
-            完整的验证 prompt
-        """
-        prompt_parts = []
-
-        # 1. 屏幕基本信息
-        if width and height:
-            prompt_parts.append(
-                f"These images are two computer screenshots before and after an operation. "
-                f"Their widths are {width} pixels and their heights are {height} pixels.\n\n"
-            )
-        else:
-            prompt_parts.append(
-                "These images are two computer screenshots before and after an operation.\n\n"
-            )
-
-        # 2. UI 元素说明
-        prompt_parts.append(
-            "In order to help you better perceive the content in this screenshot, "
-            "we extract some information on the current screenshot. "
-            "The information consists of format: coordinates; content. "
-            "The format of the coordinates is [x, y], x is the pixel from left to right "
-            "and y is the pixel from top to bottom; the content is a text or an icon description.\n\n"
-        )
-
-        # 3. 操作前的 UI 元素
-        if before_ui_elements and len(before_ui_elements) > 0:
-            prompt_parts.append("### Before the current operation ###")
-            prompt_parts.append("Screenshot information:")
-            for elem in before_ui_elements:
-                coords = elem.get('position', (0, 0))
-                size = elem.get('size', (0, 0))
-                center_x = coords[0] + size[0] // 2
-                center_y = coords[1] + size[1] // 2
-                text = elem.get('title') or elem.get('text') or 'icon'
-
-                if text and text != 'icon' and coords != (0, 0):
-                    prompt_parts.append(f"[{center_x}, {center_y}]; {text}")
-            prompt_parts.append("\n")
-
-        # 4. 操作后的 UI 元素
-        if after_ui_elements and len(after_ui_elements) > 0:
-            prompt_parts.append("### After the current operation ###")
-            prompt_parts.append("Screenshot information:")
-            for elem in after_ui_elements:
-                coords = elem.get('position', (0, 0))
-                size = elem.get('size', (0, 0))
-                center_x = coords[0] + size[0] // 2
-                center_y = coords[1] + size[1] // 2
-                text = elem.get('title') or elem.get('text') or 'icon'
-
-                if text and text != 'icon' and coords != (0, 0):
-                    prompt_parts.append(f"[{center_x}, {center_y}]; {text}")
-            prompt_parts.append("\n")
-
-        # 5. 当前操作信息
-        prompt_parts.append("### Current operation ###")
-        prompt_parts.append(f"The user's instruction is: {instruction}")
-        prompt_parts.append(
-            "In the process of completing the requirements of instruction, "
-            "an operation is performed on the computer. Below are the details of this operation:"
-        )
-
-        # 提取操作意图（从 action 和 parameters）
-        operation_thought = self._extract_operation_thought(action, parameters)
-        prompt_parts.append(f"Operation thought: {operation_thought}")
-        prompt_parts.append(f"Operation action: {action}")
-        prompt_parts.append("")
-
-        # 6. 响应要求
-        prompt_parts.append("### Response requirements ###")
-        prompt_parts.append(
-            "Now you need to output the following content based on the screenshots "
-            "before and after the current operation:"
-        )
-        prompt_parts.append(
-            "1. Whether the result of the \"Operation action\" meets your expectation of \"Operation thought\"?"
-        )
-        prompt_parts.append(
-            "2. IMPORTANT: By carefully examining the screenshot after the operation, "
-            "verify if the actual goal described in the user's instruction is achieved."
-        )
-        prompt_parts.append("Choose one of the following:")
-        prompt_parts.append(
-            "A: The result of the \"Operation action\" meets my expectation of \"Operation thought\" "
-            "AND the actual goal in the instruction is achieved based on the current screenshot."
-        )
-        prompt_parts.append(
-            "B: The \"Operation action\" results in a wrong page and I need to do something to correct this."
-        )
-        prompt_parts.append("C: The \"Operation action\" produces no changes.")
-        prompt_parts.append(
-            "D: The \"Operation action\" seems to complete, but the actual goal in the instruction "
-            "is NOT achieved based on the current screenshot (e.g., clicked wrong position, wrong item selected)."
-        )
-        prompt_parts.append("")
-
-        # 7. 输出格式
-        prompt_parts.append("### Output format ###")
-        prompt_parts.append("Your output format is:")
-        prompt_parts.append(
-            "### Thought ###\n"
-            "Your thought about the question. Please explicitly verify if the goal "
-            "in the instruction is achieved by checking the screenshot."
-        )
-        prompt_parts.append("### Answer ###\nA or B or C or D")
-
-        return "\n".join(prompt_parts)
 
     def _extract_operation_thought(self, action: str, parameters: dict) -> str:
         """
@@ -356,30 +293,25 @@ class ReflectAgent:
         try:
             response_text = response_text.strip()
 
-            # 1. 提取 Thought 部分
-            thought_match = re.search(
-                r'###\s*Thought\s*###\s*\n(.*?)(?=###\s*Answer\s*###|$)',
-                response_text,
-                re.DOTALL | re.IGNORECASE
-            )
+            # 1. 提取 Thought 部分（复用预编译正则）
+            thought_match = self.THOUGHT_PATTERN.search(response_text)
 
             analysis = ''
             if thought_match:
                 analysis = thought_match.group(1).strip()
 
-            # 2. 提取 Answer 部分（A/B/C/D）
-            answer_match = re.search(
-                r'###\s*Answer\s*###\s*\n?\s*([A-D])',
-                response_text,
-                re.IGNORECASE
-            )
+            # 2. 提取 Answer 部分（A/B/C/D）（复用预编译正则）
+            answer_match = self.ANSWER_PATTERN.search(response_text)
+
+            # 3. 提取 Suggestion 部分
+            suggestion_match = self.SUGGESTION_PATTERN.search(response_text)
+            vlm_suggestion = ''
+            if suggestion_match:
+                vlm_suggestion = suggestion_match.group(1).strip()
 
             if not answer_match:
                 # 尝试直接查找单独的 A/B/C/D
-                standalone_match = re.search(
-                    r'(?:^|\n)\s*([A-D])\s*(?:$|\n)',
-                    response_text
-                )
+                standalone_match = self.STANDALONE_STATUS_PATTERN.search(response_text)
                 if standalone_match:
                     status = standalone_match.group(1)
                 else:
@@ -387,21 +319,20 @@ class ReflectAgent:
             else:
                 status = answer_match.group(1).upper()
 
-            # 3. 状态映射（PC-Agent 标准）
+            # 4. 状态映射（PC-Agent 标准）
             mapped = self.STATUS_MAP.get(status, self.STATUS_MAP[self.STATUS_NO_CHANGE])
 
-            # 4. 提取变化描述（从 Thought 中）
+            # 5. 提取变化描述（从 Thought 中）
             changes = self._extract_changes_from_analysis(analysis, status)
 
-            # 5. 生成建议
-            suggestion = self._generate_suggestion(status, analysis)
+            # 6. 生成建议：优先使用 VLM 生成的，如果没有则使用兜底建议
+            suggestion = self._generate_suggestion(status, analysis, vlm_suggestion)
 
-            # 6. 构建最终结果
+            # 7. 构建最终结果
             result = {
                 'status': mapped['status'],
                 'success': mapped['success'],
                 'error_flag': mapped['error_flag'],
-                'confidence': mapped['confidence'],
                 'changes': changes,
                 'analysis': analysis,
                 'suggestion': suggestion
@@ -413,11 +344,14 @@ class ReflectAgent:
             print(f"[ReflectAgent] 解析异常：{e}")
             print(f"原始响应：{response_text[:self.LOG_RESPONSE_LENGTH]}...")
 
-            # 返回保守结果
+            # 返回保守结果（补充完整字段）
             return {
-                'status': 'error',
+                'status': 'C',
                 'success': False,
                 'error_flag': True,
+                'changes': ['解析验证结果失败'],
+                'analysis': f'VLM响应解析异常：{str(e)}',
+                'suggestion': '建议重新尝试该操作或检查VLM服务状态'
             }
 
     def _extract_changes_from_analysis(self, analysis: str, status: str) -> list:
@@ -465,17 +399,22 @@ class ReflectAgent:
 
         return changes
 
-    def _generate_suggestion(self, status: str, analysis: str) -> str:
+    def _generate_suggestion(self, status: str, analysis: str, vlm_suggestion: str = '') -> str:
         """
         根据验证状态生成下一步建议
-
         Args:
             status: 验证状态
             analysis: 分析文本
+            vlm_suggestion: VLM 生成的建议（可选）
 
         Returns:
             建议字符串
         """
+        # 如果 VLM 生成了有效建议，优先使用
+        if vlm_suggestion and len(vlm_suggestion) > 0:
+            return vlm_suggestion
+
+        # 否则使用固定的兜底建议
         return self.DEFAULT_SUGGESTIONS.get(
             status,
             '建议重新评估当前状态并调整策略。'

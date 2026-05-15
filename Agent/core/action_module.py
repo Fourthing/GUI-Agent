@@ -92,6 +92,8 @@ class ActionModule:
                 result = {'success': True, 'message': params.get('message', '任务完成')}
             elif action in ['FAILE', 'FAIL']:
                 result = {'success': False, 'message': params.get('reason', '未知失败')}
+            elif action == 'OPEN_START_MENU':
+                result = self._open_start_menu(params)
             else:
                 result = {'success': False, 'message': f'未知动作：{action}'}
 
@@ -502,6 +504,35 @@ class ActionModule:
             return {
                 'success': False,
                 'message': f'拖拽失败：{str(e)}'
+            }
+
+    def _open_start_menu(self, params: Dict) -> Dict:
+        """
+        打开开始菜单（快捷操作）
+
+        Parameters:
+            无需参数，直接点击屏幕左下角
+        """
+        try:
+            screen_width, screen_height = pyautogui.size()
+
+            # 点击左下角（Windows 开始按钮位置）
+            start_x = 10
+            start_y = screen_height - 10
+
+            print(f"[Action] 🚀 快捷操作：打开开始菜单 → 点击 ({start_x}, {start_y})")
+
+            pyautogui.click(start_x, start_y)
+
+            return {
+                'success': True,
+                'message': f'✓ 已打开开始菜单（点击左下角 {start_x}, {start_y}）',
+                'executed_action': 'OPEN_START_MENU'
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'打开开始菜单失败：{str(e)}'
             }
 
     def get_screen_info(self) -> Dict[str, Any]:

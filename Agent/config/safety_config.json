@@ -40,6 +40,10 @@
     ]
   },
   "sensitive_keywords": [
+    "删除",
+    "格式化",
+    "永久",
+    "清除",
     "删除所有文件",
     "格式化硬盘",
     "清空回收站",
@@ -1391,7 +1395,8 @@
   ],
   "high_risk_patterns": {
     "HOTKEY": [
-      "win+r",
+      "winleft+r",
+      "winright+r",
       "alt+f4",
       "ctrl+w",
       "ctrl+q",
